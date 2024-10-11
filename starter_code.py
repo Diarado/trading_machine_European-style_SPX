@@ -180,3 +180,5 @@ class Strategy:
 
 # st = Strategy()
 # st.generate_orders()
+# li edit
+st = Strategy()
