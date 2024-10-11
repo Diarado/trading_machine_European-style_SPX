@@ -1,159 +1,182 @@
-import os
 import pandas as pd
-from datetime import datetime
+import numpy as np
+from datetime import datetime, timedelta
+import os
 import re
 
 class Strategy:
   
-  def __init__(self) -> None:
-    self.capital : float = 100_000_000
-    self.portfolio_value : float = 0
+    def __init__(self) -> None:
+        self.capital : float = 100_000_000
+        self.portfolio_value : float = 0
 
-    self.start_date : datetime = datetime(2024, 1, 1)
-    self.end_date : datetime = datetime(2024, 3, 30)
-  
-    self.options : pd.DataFrame = pd.read_csv("data/cleaned_options_data.csv")
-    self.options["day"] = self.options["ts_recv"].apply(lambda x: x.split("T")[0])
+        self.start_date : datetime = datetime(2024, 1, 1)
+        self.end_date : datetime = datetime(2024, 3, 30)
+    
+        self.options : pd.DataFrame = pd.read_csv("data/cleaned_options_data.csv").copy()
+        self.options["day"] = self.options["ts_recv"].apply(lambda x: x.split("T")[0])
 
-    self.underlying = pd.read_csv("data/underlying_data_hour.csv")
-    self.underlying.columns = self.underlying.columns.str.lower()
-
-  def load_or_parse_options(self, raw_file_path: str, parsed_file_path: str) -> pd.DataFrame:
-        """
-        Load parsed options data if available, otherwise parse raw data and save it.
+        self.underlying = pd.read_csv("data/underlying_data_hour.csv").copy()
+        self.underlying.columns = self.underlying.columns.str.lower()
         
-        Parameters:
-            raw_file_path (str): Path to the raw options data CSV file.
-            parsed_file_path (str): Path to the file where parsed data should be stored.
-        """
+        # parse the 'date' column
+        self.underlying['date'] = pd.to_datetime(self.underlying['date'], format='%Y-%m-%d %H:%M:%S%z', utc=True)
+        self.underlying['date'] = self.underlying['date'].dt.tz_localize(None)  # Remove timezone info
+
+    def generate_orders(self) -> pd.DataFrame:
+        parsed_options = self.load_or_parse_options("data/cleaned_options_data.csv", "data/parsed_options_data.pkl")
+        
+        lookback_period = 10  # lookback period for trend analysis
+        volatility_threshold = 0.001  # volatility threshold
+        max_days_to_expiration = 30  # max days to expiration for selected options
+        
+        orders = []
+        
+        for date in parsed_options['timestamp'].dt.date.unique():
+            options_today = parsed_options[parsed_options['timestamp'].dt.date == date]
+            underlying_today = self.underlying[self.underlying['date'].dt.date == date]
+            
+            if len(underlying_today) == 0:
+                continue
+            
+            current_price = underlying_today['close'].iloc[-1]
+            
+            # trend using exponential moving average
+            if len(self.underlying) >= lookback_period:
+                ema = self.underlying['close'].ewm(span=lookback_period, adjust=False).mean()
+                trend = (current_price - ema.iloc[-1]) / ema.iloc[-1]
+            else:
+                trend = 0
+            
+            # recent volatility
+            if len(self.underlying) >= lookback_period:
+                recent_returns = self.underlying['close'].pct_change().tail(lookback_period)
+                volatility = recent_returns.std()
+            else:
+                volatility = 0
+            
+            # only keep options with expiration date <= max
+            max_expiration = date + timedelta(days = max_days_to_expiration)
+            valid_options = options_today[options_today['expiration_date'] <= max_expiration]
+            
+            # orders based on market conditions
+            if trend > 0.001 and volatility < volatility_threshold:
+                calls = valid_options[(valid_options['option_type'] == 'Call') & 
+                                      (valid_options['strike_price'] > current_price) & 
+                                      (valid_options['strike_price'] < current_price * 1.05)]
+                if not calls.empty:
+                    best_call = calls.loc[calls['mid_price'].idxmin()]
+                    order_size = int(min(100, max(10, abs(trend) * 1000)))  # more order if trend is high
+                    orders.append({
+                        'datetime': best_call['timestamp'].strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
+                        'option_symbol': f"SPX   {best_call['expiration_date'].strftime('%y%m%d')}C{int(best_call['strike_price']*1000):08d}",
+                        'action': 'B',
+                        'order_size': order_size
+                    })
+            elif trend < -0.001 and volatility < volatility_threshold:
+                puts = valid_options[(valid_options['option_type'] == 'Put') & 
+                                     (valid_options['strike_price'] < current_price) & 
+                                     (valid_options['strike_price'] > current_price * 0.95)]
+                if not puts.empty:
+                    best_put = puts.loc[puts['mid_price'].idxmin()]
+                    order_size = int(min(100, max(10, abs(trend) * 1000)))  # Scale order size with trend
+                    orders.append({
+                        'datetime': best_put['timestamp'].strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
+                        'option_symbol': f"SPX   {best_put['expiration_date'].strftime('%y%m%d')}P{int(best_put['strike_price']*1000):08d}",
+                        'action': 'B',
+                        'order_size': order_size
+                    })
+            elif volatility >= volatility_threshold:
+                atm_options = valid_options[abs(valid_options['strike_price'] - current_price) < 5]
+                if not atm_options.empty:
+                    atm_call = atm_options[atm_options['option_type'] == 'Call'].iloc[0]
+                    atm_put = atm_options[atm_options['option_type'] == 'Put'].iloc[0]
+                    order_size = int(min(50, max(5, volatility * 1000)))  # Scale order size with volatility
+                    orders.extend([
+                        {
+                            'datetime': atm_call['timestamp'].strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
+                            'option_symbol': f"SPX   {atm_call['expiration_date'].strftime('%y%m%d')}C{int(atm_call['strike_price']*1000):08d}",
+                            'action': 'S',
+                            'order_size': order_size
+                        },
+                        {
+                            'datetime': atm_put['timestamp'].strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
+                            'option_symbol': f"SPX   {atm_put['expiration_date'].strftime('%y%m%d')}P{int(atm_put['strike_price']*1000):08d}",
+                            'action': 'S',
+                            'order_size': order_size
+                        }
+                    ])
+        
+        result = pd.DataFrame(orders)
+        print(f"Final number of orders generated: {len(result)}")
+        print(result.head(10))
+        return result
+
+
+    def load_or_parse_options(self, raw_file_path: str, parsed_file_path: str) -> pd.DataFrame:
         if os.path.exists(parsed_file_path):
             print(f"Loading parsed options data from {parsed_file_path}")
             return pd.read_pickle(parsed_file_path)
         else:
-            # Parse the raw data
             print(f"Parsing raw options data from {raw_file_path}")
             options = pd.read_csv(raw_file_path)
             parsed_options = self.parse_data(options)
-            # Save the parsed data for future use
             parsed_options.to_pickle(parsed_file_path)
             return parsed_options
-  
-  def generate_orders(self) -> pd.DataFrame:
-    # implement me!
-    parsed_option = self.load_or_parse_options("data/cleaned_options_data.csv", "data/parsed_options_data.pkl")
-    # pd.set_option('display.max_rows', 10)        
-    # pd.set_option('display.max_columns', None)   
-    # pd.set_option('display.width', None)        
-    # pd.set_option('display.max_colwidth', None)   
-    # print(parsed_option.head(10))
-    pass
-  
 
+    def parse_data(self, options: pd.DataFrame) -> pd.DataFrame:
+        df = options.copy()
 
+        df.rename(columns={
+            'ts_recv': 'timestamp',
+            'bid_px_00': 'bid_price',
+            'ask_px_00': 'ask_price',
+            'bid_sz_00': 'bid_size',
+            'ask_sz_00': 'ask_size',
+            'symbol': 'option_symbol'
+        }, inplace=True)
 
-  # helper method
-  def parse_data(self, options: pd.DataFrame) -> pd.DataFrame:
-      """
-      Parses the cleaned_options_data.csv and returns a cleaned DataFrame with columns:
-          'timestamp',
-          'instrument_id',
-          'expiration_date',
-          'option_type',
-          'strike_price',
-          'bid_price',
-          'ask_price',
-          'bid_size',
-          'ask_size',
-          'mid_price',
-          'spread'
+        df['timestamp'] = pd.to_datetime(df['timestamp'], format='%Y-%m-%dT%H:%M:%S.%fZ')
 
-      Parameters:
-          options (pd.DataFrame): cleaned_options_data.csv
+        def parse_symbol(symbol: str):
+            pattern = r'(\d{6})([CP])(\d{8})'
+            match = re.search(pattern, symbol)
+            if match:
+                exp, type, strike = match.groups()
+                exp_date = datetime.strptime(exp, '%y%m%d').date()
+                option_type = 'Call' if type == 'C' else 'Put'
+                strike_price = int(strike) / 1000
+                return exp_date, option_type, strike_price
+            else:
+                return None, None, None
 
-      Returns:
-          pd.DataFrame: Parsed options data.
-      """
-      df = options.copy()
+        df[['expiration_date', 'option_type', 'strike_price']] = df['option_symbol'].apply(
+            lambda x: pd.Series(parse_symbol(x))
+        )
+        df.dropna(subset=['expiration_date', 'option_type', 'strike_price'], inplace=True)
 
-      df.rename(columns={
-          'ts_recv': 'timestamp',
-          'bid_px_00': 'bid_price',
-          'ask_px_00': 'ask_price',
-          'bid_sz_00': 'bid_size',
-          'ask_sz_00': 'ask_size',
-          'symbol': 'option_symbol'
-      }, inplace=True)
+        df['mid_price'] = (df['bid_price'] + df['ask_price']) / 2
+        df['spread'] = df['ask_price'] - df['bid_price']
 
-      # convert timestamp to datetime
-      # example: 2024-01-02T14:30:02.402838204Z
-      df['timestamp'] = pd.to_datetime(df['timestamp'], format='%Y-%m-%dT%H:%M:%S.%fZ')
+        df['bid_price'] = df['bid_price'].astype(float)
+        df['ask_price'] = df['ask_price'].astype(float)
+        df['bid_size'] = df['bid_size'].astype(int)
+        df['ask_size'] = df['ask_size'].astype(int)
+        df['strike_price'] = df['strike_price'].astype(float)
 
-      # From option_symbol, extract expiration date, option type, and strike price
-      # Example: 'SPX   240119P04700000'
-      # 
-      # - '240119' -> Expiration Date: 2024-01-19
-      # - 'P' -> Put
-      # - '04700000' -> Strike Price: 4700.0000
-
-      def parse_symbol(symbol: str):
-          """
-          Helper func
-          Parses the option symbol to extract expiration date, option type, and strike price.
-          Returns:
-              tuple: (expiration_date, option_type, strike_price)
-          """
-          # first 6 digits is exp date
-          # find either C or P
-          # last 8 digits is strike price
-          pattern = r'(\d{6})([CP])(\d{8})'
-          match = re.search(pattern, symbol)
-          if match:
-              exp, type, strike = match.groups()
-              # expiration date
-              exp_date = datetime.strptime(exp, '%y%m%d').date()
-              # option type
-              option_type = 'Call' if type == 'C' else 'Put'
-              # strike price
-              strike_price = int(strike) / 1000  # last three digits are decimals
-              return exp_date, option_type, strike_price
-          else:
-              print('bad input')
-              return None, None, None
-
-      # create 3 new columns from option symbol
-      df[['expiration_date', 'option_type', 'strike_price']] = df['option_symbol'].apply(
-          lambda x: pd.Series(parse_symbol(x))
-      )
-      df.dropna(subset=['expiration_date', 'option_type', 'strike_price'], inplace=True)
-
-      # additional fields can be necessary
-      # mid price
-      df['mid_price'] = (df['bid_price'] + df['ask_price']) / 2
-
-      # spread
-      df['spread'] = df['ask_price'] - df['bid_price']
-
-      df['bid_price'] = df['bid_price'].astype(float)
-      df['ask_price'] = df['ask_price'].astype(float)
-      df['bid_size'] = df['bid_size'].astype(int)
-      df['ask_size'] = df['ask_size'].astype(int)
-      df['strike_price'] = df['strike_price'].astype(float)
-
-      df = df[[
-          'timestamp',
-          'instrument_id',
-          'expiration_date',
-          'option_type',
-          'strike_price',
-          'bid_price',
-          'ask_price',
-          'bid_size',
-          'ask_size',
-          'mid_price',
-          'spread'
-      ]]
-
-      return df
+        return df[[
+            'timestamp',
+            'instrument_id',
+            'expiration_date',
+            'option_type',
+            'strike_price',
+            'bid_price',
+            'ask_price',
+            'bid_size',
+            'ask_size',
+            'mid_price',
+            'spread'
+        ]]
 
 # st = Strategy()
 # st.generate_orders()
