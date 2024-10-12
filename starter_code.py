@@ -112,6 +112,8 @@ class Strategy:
         print(result.head(10))
         return result
 
+    def dongweiTest(self):
+        print("1")
 
     def load_or_parse_options(self, raw_file_path: str, parsed_file_path: str) -> pd.DataFrame:
         if os.path.exists(parsed_file_path):
