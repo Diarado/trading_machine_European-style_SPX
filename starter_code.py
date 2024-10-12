@@ -3,6 +3,7 @@ import numpy as np
 from datetime import datetime, timedelta
 import os
 import re
+from scipy.stats import norm 
 
 class Strategy:
   
@@ -112,8 +113,7 @@ class Strategy:
         print(result.head(10))
         return result
 
-    def dongweiTest(self):
-        print("1")
+   
 
     def load_or_parse_options(self, raw_file_path: str, parsed_file_path: str) -> pd.DataFrame:
         if os.path.exists(parsed_file_path):
@@ -179,7 +179,81 @@ class Strategy:
             'mid_price',
             'spread'
         ]]
+    
+    # # Greek calculation functions
+    # def calculate_delta(self, S, K, T, r, sigma, option_type):
+    #     """
+    #     Calculates the Delta of an option.
+    #     """
+    #     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    #     if option_type == 'Call':
+    #         delta = norm.cdf(d1)
+    #     else:
+    #         delta = -norm.cdf(-d1)
+    #     return delta
 
+    # def calculate_theta(self, S, K, T, r, sigma, option_type):
+    #     """
+    #     Calculates the Theta of an option.
+    #     """
+    #     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    #     d2 = d1 - sigma * np.sqrt(T)
+    #     term1 = - (S * sigma * norm.pdf(d1)) / (2 * np.sqrt(T))
+    #     if option_type == 'Call':
+    #         theta = (term1 - r * K * np.exp(-r * T) * norm.cdf(d2)) / 365
+    #     else:
+    #         theta = (term1 + r * K * np.exp(-r * T) * norm.cdf(-d2)) / 365
+    #     return theta
+
+    # def calculate_gamma(self, S, K, T, r, sigma):
+    #     """
+    #     Calculates the Gamma of an option.
+    #     """
+    #     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    #     gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
+    #     return gamma
+
+    # def calculate_vega(self, S, K, T, r, sigma):
+    #     """
+    #     Calculates the Vega of an option.
+    #     """
+    #     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    #     vega = S * norm.pdf(d1) * np.sqrt(T) / 100
+    #     return vega
+
+    # def calculate_rho(self, S, K, T, r, sigma, option_type):
+        
+    #     # Calculates the Rho of an option.
+        
+    #     d2 = (np.log(S / K) + (r - 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    #     if option_type == 'Call':
+    #         rho = K * T * np.exp(-r * T) * norm.cdf(d2) / 100
+    #     else:
+    #         rho = -K * T * np.exp(-r * T) * norm.cdf(-d2) / 100
+    #     return rho
+
+    # # Function to compute all Greeks for a single option
+    # def compute_option_greeks(self, S, K, T, r, sigma, option_type):
+    #     """
+    #     Computes all Greeks for a single option.
+    #     Returns a dictionary of Greek values.
+    #     """
+    #     delta = self.calculate_delta(S, K, T, r, sigma, option_type)
+    #     theta = self.calculate_theta(S, K, T, r, sigma, option_type)
+    #     gamma = self.calculate_gamma(S, K, T, r, sigma)
+    #     vega = self.calculate_vega(S, K, T, r, sigma)
+    #     rho = self.calculate_rho(S, K, T, r, sigma, option_type)
+
+    #     greeks = {
+    #         'delta': delta,
+    #         'theta': theta,
+    #         'gamma': gamma,
+    #         'vega': vega,
+    #         'rho': rho
+    #     }
+    #     return greeks    
+   
+      
 # st = Strategy()
 # st.generate_orders()
 # li edit
