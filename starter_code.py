@@ -7,6 +7,7 @@ from scipy import stats
 from scipy.optimize import brentq
 from scipy.stats import norm
 import matplotlib.pyplot as plt
+import bisect 
 
 class Strategy:
   
@@ -26,11 +27,88 @@ class Strategy:
         # parse the 'date' column
         self.underlying['date'] = pd.to_datetime(self.underlying['date'], format='%Y-%m-%d %H:%M:%S%z', utc=True)
         self.underlying['date'] = self.underlying['date'].dt.tz_localize(None) 
+        
         # print(self.underlying)
         columns_to_scale = ['open', 'high', 'low', 'close', 'adj close']
         self.underlying[columns_to_scale] = self.underlying[columns_to_scale] / 100
         # print(self.underlying)
+        self.idx = 0
+    
+    def plot_brentq_process(self, S, K, T, r, market_price, option_type, implied_vol):
+        """
+        Plots the objective function used in Brent's method for finding implied volatility.
+        
+        Parameters:
+        - S: Current stock price
+        - K: Strike price
+        - T: Time to maturity (in years)
+        - r: Risk-free interest rate
+        - market_price: Observed market price of the option
+        - option_type: 'Call' or 'Put'
+        - implied_vol: The implied volatility found by brentq
+        """
+        # Define the objective function
+        def objective(sigma):
+            if option_type == 'Call':
+                return self.black_scholes_call(S, K, T, r, sigma) - market_price
+            else:
+                return self.black_scholes_put(S, K, T, r, sigma) - market_price
 
+        # Define the volatility bounds
+        sigma_lower = 1e-6
+        sigma_upper = 10
+
+        # Generate a range of sigma values
+        sigma_values = np.linspace(sigma_lower, sigma_upper, 1000)
+        objective_values = [objective(sigma) for sigma in sigma_values]
+
+        # Plot the objective function
+        plt.figure(figsize=(10, 6))
+        plt.plot(sigma_values, objective_values, label='Objective Function')
+
+        # Highlight the zero line
+        plt.axhline(0, color='black', linewidth=0.5, linestyle='--')
+
+        # Plot the initial bracket points
+        f_lower = objective(sigma_lower)
+        f_upper = objective(sigma_upper)
+        plt.plot(sigma_lower, f_lower, 'ro', label=f'Sigma Lower = {sigma_lower}')
+        plt.plot(sigma_upper, f_upper, 'go', label=f'Sigma Upper = {sigma_upper}')
+
+        # Mark the implied volatility
+        if not np.isnan(implied_vol):
+            f_implied = objective(implied_vol)
+            plt.plot(implied_vol, f_implied, 'bx', markersize=12, label=f'Implied Volatility = {implied_vol:.6f}')
+            plt.annotate(f'Implied Vol: {implied_vol:.4f}', 
+                        xy=(implied_vol, f_implied), 
+                        xytext=(implied_vol, f_implied + (max(objective_values) - min(objective_values)) * 0.05),
+                        arrowprops=dict(facecolor='blue', shrink=0.05),
+                        fontsize=12,
+                        color='blue')
+
+        # Add labels and title
+        plt.xlabel('Volatility (σ)')
+        plt.ylabel('Objective Function')
+        plt.title('Objective Function for Implied Volatility Calculation using Brent\'s Method')
+        plt.legend()
+        plt.grid(True)
+        
+        save_dir = "plots"
+
+        # Create the directory if it doesn't exist
+        os.makedirs(save_dir, exist_ok=True)
+
+        # File path
+        save_path = os.path.join(save_dir, "implied_volatility_plot" + str(self.idx) + ".png")
+        self.idx += 1
+
+        # Save the plot
+        plt.savefig(save_path)
+    
+        # Close the plot to free up memory
+        plt.close()
+
+        # print(f"Plot saved successfully to {save_path}")
 
     def standardize(self, X):
         """
@@ -107,18 +185,42 @@ class Strategy:
         plt.show()
     
 
-    def calculate_implied_volatility(self, S, K, T, r, market_price, option_type):
+    def calculate_implied_volatility(self, S, K, T, r, market_price, option_type, plot=False):
+        """
+        Calculates the implied volatility using Brent's method.
+        
+        Parameters:
+        - S: Current stock price
+        - K: Strike price
+        - T: Time to maturity (in years)
+        - r: Risk-free interest rate
+        - market_price: Observed market price of the option
+        - option_type: 'Call' or 'Put'
+        - plot: If True, plots the Brent's method process
+        
+        Returns:
+        - Implied volatility
+        """
         def objective(sigma):
             if option_type == 'Call':
                 return self.black_scholes_call(S, K, T, r, sigma) - market_price
             else:
                 return self.black_scholes_put(S, K, T, r, sigma) - market_price
-        
+
+        sigma_lower = 1e-6
+        sigma_upper = 10  # Volatility is between 0.0001% and 1000%
+
         try:
-            return brentq(objective, 1e-6, 10)  # volatility is between 0.0001% and 1000%
+            implied_vol = brentq(objective, sigma_lower, sigma_upper)
         except ValueError:
-            return np.nan  # Return NaN if unable to find a root
-            # return 1e-6
+            # Handle cases where brentq fails to find a root
+            implied_vol = 1e-6
+
+        if plot:
+            self.plot_brentq_process(S, K, T, r, market_price, option_type, implied_vol)
+
+        return implied_vol
+
     
 
     ### current_price, option['strike_price'], T, risk_free_rate, implied_vol, option['option_type']
@@ -197,36 +299,62 @@ class Strategy:
         daily_returns = []
         
         for date in parsed_options['timestamp'].dt.date.unique():
+            # print('date: ' + str(date))
             options_today = parsed_options[parsed_options['timestamp'].dt.date == date]
             underlying_today = self.underlying[self.underlying['date'].dt.date == date]
+            print('underlying_today: ')
             print(underlying_today)
             if len(underlying_today) == 0:
                 continue
             
-            current_price = underlying_today['adj close'].iloc[-1]
             
-            print('cur_price: ' + str(current_price))
+            current_prices = underlying_today[['date', 'adj close']]
+            current_prices['time'] = current_prices['date'].dt.time
+            
+            options_today['time'] = options_today['timestamp'].dt.time
+            
+            date_list = current_prices['time'].tolist()
+            print('dates: ')
+            print(date_list)
             # Calculate Greeks for all options
             greeks_list = []
             pd.set_option('display.max_columns', None)
-            print(options_today)
+            # print('options')
+            # print(options_today)
             for _, option in options_today.iterrows():
+                # TODO
+                # print('option: ')
+                # print(option)
+                
+                option_timestamp = option['time']
+                # print('option_timestamp')
+                # print(option_timestamp)
+                idx = bisect.bisect_right(date_list, option_timestamp) - 1
+
+                
+                if idx >= 0:
+                    current_price = current_prices.iloc[idx]['adj close']
+                    # print(f'Option timestamp: {option_timestamp}, Closest adj close: {current_price}')
+                else:
+                    print(f'No earlier data for option timestamp: {option_timestamp}')
+                
+                
                 days_to_expiration = (option['expiration_date'] - date).days
                 T = days_to_expiration / 365.0
                 
                 implied_vol = self.calculate_implied_volatility(current_price, option['strike_price'], 
                                                                 T, risk_free_rate, option['mid_price'], 
                                                                 option['option_type'])
-                print('cur_price: ' + str(current_price))
-                print('option strike_price' + str(option['strike_price']))
-                print('time: ' + str(T))
-                print('risk_rate: ' + str(risk_free_rate))
-                print('implied vol: ' + str(implied_vol))
-                print('option' + str(option['option_type']))
+                # print('cur_price: ' + str(current_price))
+                # print('option strike_price' + str(option['strike_price']))
+                # print('time: ' + str(T))
+                # print('risk_rate: ' + str(risk_free_rate))
+                # print('implied vol: ' + str(implied_vol))
+                # print('option' + str(option['option_type']))
                 greeks = self.compute_option_greeks(current_price, option['strike_price'], 
                                                     T, risk_free_rate, implied_vol, 
                                                     option['option_type'])
-                print(greeks)
+                # print(greeks)
                
                 if greeks:
                     greeks['option_id'] = option['instrument_id']
@@ -344,8 +472,10 @@ class Strategy:
         df['bid_size'] = df['bid_size'].astype(int)
         df['ask_size'] = df['ask_size'].astype(int)
         df['strike_price'] = df['strike_price'].astype(float)
+        df['index'] = df.index + 1
     
         return df[[
+            'index',
             'timestamp',
             'instrument_id',
             'expiration_date',
