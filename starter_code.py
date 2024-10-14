@@ -25,7 +25,12 @@ class Strategy:
         
         # parse the 'date' column
         self.underlying['date'] = pd.to_datetime(self.underlying['date'], format='%Y-%m-%d %H:%M:%S%z', utc=True)
-        self.underlying['date'] = self.underlying['date'].dt.tz_localize(None)  
+        self.underlying['date'] = self.underlying['date'].dt.tz_localize(None) 
+        # print(self.underlying)
+        columns_to_scale = ['open', 'high', 'low', 'close', 'adj close']
+        self.underlying[columns_to_scale] = self.underlying[columns_to_scale] / 100
+        # print(self.underlying)
+
 
     def standardize(self, X):
         """
@@ -113,7 +118,10 @@ class Strategy:
             return brentq(objective, 1e-6, 10)  # volatility is between 0.0001% and 1000%
         except ValueError:
             return np.nan  # Return NaN if unable to find a root
+            # return 1e-6
+    
 
+    ### current_price, option['strike_price'], T, risk_free_rate, implied_vol, option['option_type']
     def compute_option_greeks(self, S, K, T, r, sigma, option_type):
         """
         Computes all Greeks for a single option.
@@ -176,7 +184,8 @@ class Strategy:
         return pca_results, explained_variance_ratio[:n_components]
 
     def generate_orders(self) -> pd.DataFrame:
-        parsed_options = self.load_or_parse_options("data/cleaned_options_data.csv", "data/parsed_options_data.pkl")
+        parsed_options = self.load_or_parse_options("data/cleaned_options_data.csv", 
+                                                    "data/parsed_options_data.pkl")
         
         risk_free_rate = 0.03 # predetermined
         max_order_size = 100 # TODO: to be adjusted
@@ -205,15 +214,20 @@ class Strategy:
                 days_to_expiration = (option['expiration_date'] - date).days
                 T = days_to_expiration / 365.0
                 
-                implied_vol = self.calculate_implied_volatility(current_price, option['strike_price'], T, risk_free_rate, option['mid_price'], option['option_type'])
+                implied_vol = self.calculate_implied_volatility(current_price, option['strike_price'], 
+                                                                T, risk_free_rate, option['mid_price'], 
+                                                                option['option_type'])
                 print('cur_price: ' + str(current_price))
                 print('option strike_price' + str(option['strike_price']))
                 print('time: ' + str(T))
                 print('risk_rate: ' + str(risk_free_rate))
                 print('implied vol: ' + str(implied_vol))
                 print('option' + str(option['option_type']))
-                greeks = self.compute_option_greeks(current_price, option['strike_price'], T, risk_free_rate, implied_vol, option['option_type'])
-                # print(greeks)
+                greeks = self.compute_option_greeks(current_price, option['strike_price'], 
+                                                    T, risk_free_rate, implied_vol, 
+                                                    option['option_type'])
+                print(greeks)
+               
                 if greeks:
                     greeks['option_id'] = option['instrument_id']
                     greeks_list.append(greeks)
@@ -232,7 +246,7 @@ class Strategy:
                 print(f"PCA failed for date {date}. Skipping this date.")
                 continue
 
-            self.visualize_pca_results(pca_results, explained_variance_ratio)
+            # self.visualize_pca_results(pca_results, explained_variance_ratio)
             
             # Generate trading signals
             thresholds = {0: 1.0, 1: 0.5}  # Example thresholds, adjust as needed
@@ -355,7 +369,7 @@ class Strategy:
             delta = norm.cdf(d1)
         else:
             delta = -norm.cdf(-d1)
-        print('delta: ' + str(delta))
+        
         return delta
 
     def calculate_theta(self, S, K, T, r, sigma, option_type):
