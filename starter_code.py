@@ -8,6 +8,7 @@ from scipy.optimize import brentq
 from scipy.stats import norm
 import matplotlib.pyplot as plt
 import bisect 
+from collections import deque
 
 class Strategy:
   
@@ -164,27 +165,6 @@ class Strategy:
         return K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
     
 
-    def visualize_pca_results(self, pca_results, explained_variance_ratio):
-        plt.figure(figsize=(12, 5))
-        
-        # Plot PCA results
-        plt.subplot(1, 2, 1)
-        plt.scatter(pca_results[:, 0], pca_results[:, 1], alpha=0.5)
-        plt.xlabel('First Principal Component')
-        plt.ylabel('Second Principal Component')
-        plt.title('PCA Results')
-        
-        # Plot explained variance ratio
-        plt.subplot(1, 2, 2)
-        plt.bar(range(1, len(explained_variance_ratio) + 1), explained_variance_ratio)
-        plt.xlabel('Principal Component')
-        plt.ylabel('Explained Variance Ratio')
-        plt.title('Explained Variance Ratio by Principal Component')
-        
-        plt.tight_layout()
-        plt.show()
-    
-
     def calculate_implied_volatility(self, S, K, T, r, market_price, option_type, plot=False):
         """
         Calculates the implied volatility using Brent's method.
@@ -221,8 +201,6 @@ class Strategy:
 
         return implied_vol
 
-    
-
     ### current_price, option['strike_price'], T, risk_free_rate, implied_vol, option['option_type']
     def compute_option_greeks(self, S, K, T, r, sigma, option_type):
         """
@@ -247,44 +225,13 @@ class Strategy:
         except:
             return None
 
-    def perform_pca(self, X, n_components=None):
-        """
-        Perform PCA on the input data.
-        
-        :param X: Input data (standardized)
-        :param n_components: Number of components to keep
-        :return: PCA results and explained variance ratios
-        """
-        # Remove any rows with NaN or inf values
-        X = X[~np.isnan(X).any(axis=1) & ~np.isinf(X).any(axis=1)]
-        
-        if X.shape[0] == 0:
-            print("No valid data for PCA after removing NaN and inf values.")
-            return None, None
-
-        # Compute the covariance matrix
-        cov_matrix = np.cov(X.T)
-        
-        # Compute eigenvalues and eigenvectors
-        eigenvalues, eigenvectors = np.linalg.eig(cov_matrix)
-        
-        # Sort eigenvalues and eigenvectors in descending order
-        idx = eigenvalues.argsort()[::-1]
-        eigenvalues = eigenvalues[idx]
-        eigenvectors = eigenvectors[:, idx]
-        
-        # Compute explained variance ratios
-        explained_variance_ratio = eigenvalues / np.sum(eigenvalues)
-        
-        # Select number of components
-        if n_components is None:
-            n_components = X.shape[1]
-        
-        # Project data onto principal components
-        pca_results = np.dot(X, eigenvectors[:, :n_components])
-        
-        return pca_results, explained_variance_ratio[:n_components]
-
+    def calculate_macd(self, prices, slow=26, fast=12, signal=9):
+        ema_fast = prices.ewm(span=fast, adjust=False).mean()
+        ema_slow = prices.ewm(span=slow, adjust=False).mean()
+        macd = ema_fast - ema_slow
+        signal_line = macd.ewm(span=signal, adjust=False).mean()
+        return macd, signal_line
+    
     def generate_orders(self) -> pd.DataFrame:
         parsed_options = self.load_or_parse_options("data/cleaned_options_data.csv", 
                                                     "data/parsed_options_data.pkl")
@@ -298,6 +245,9 @@ class Strategy:
         portfolio_value = self.capital
         daily_returns = []
         
+        window = deque()
+        window_duration = timedelta(minutes=30)
+        
         for date in parsed_options['timestamp'].dt.date.unique():
             # print('date: ' + str(date))
             options_today = parsed_options[parsed_options['timestamp'].dt.date == date]
@@ -307,39 +257,45 @@ class Strategy:
             if len(underlying_today) == 0:
                 continue
             
-            
-            current_prices = underlying_today[['date', 'adj close']]
+            current_prices = underlying_today[['date', 'adj close']].copy()
             current_prices['time'] = current_prices['date'].dt.time
             
+            options_today = options_today.copy()
             options_today['time'] = options_today['timestamp'].dt.time
             
             date_list = current_prices['time'].tolist()
-            print('dates: ')
-            print(date_list)
+            # print('dates: ')
+            # print(date_list)
             # Calculate Greeks for all options
             greeks_list = []
-            pd.set_option('display.max_columns', None)
+
             # print('options')
             # print(options_today)
             for _, option in options_today.iterrows():
-                # TODO
                 # print('option: ')
                 # print(option)
                 
                 option_timestamp = option['time']
+                print('option_timestamp')
+                print(option_timestamp)
                 # print('option_timestamp')
                 # print(option_timestamp)
                 idx = bisect.bisect_right(date_list, option_timestamp) - 1
 
-                
                 if idx >= 0:
                     current_price = current_prices.iloc[idx]['adj close']
+                    print(current_price)
                     # print(f'Option timestamp: {option_timestamp}, Closest adj close: {current_price}')
                 else:
                     print(f'No earlier data for option timestamp: {option_timestamp}')
+                    continue
                 
                 
                 days_to_expiration = (option['expiration_date'] - date).days
+                if days_to_expiration <= 0:
+                    print(f"Option {option['instrument_id']} has expired. Skipping.")
+                    continue  # Skip expired options
+                
                 T = days_to_expiration / 365.0
                 
                 implied_vol = self.calculate_implied_volatility(current_price, option['strike_price'], 
@@ -365,61 +321,93 @@ class Strategy:
                 continue
 
             greeks_df = pd.DataFrame(greeks_list).set_index('option_id')
-            
-            # Perform PCA on standardized Greeks
-            standardized_greeks = self.standardize(greeks_df.values)
-            pca_results, explained_variance_ratio = self.perform_pca(standardized_greeks, n_components=2)
-            
-            if pca_results is None:
-                print(f"PCA failed for date {date}. Skipping this date.")
-                continue
 
-            # self.visualize_pca_results(pca_results, explained_variance_ratio)
+            # Update the window with the current timestamp and price
+            # TODO
+            # print('options_today')
+            # print(options_today['timestamp'])
+            window.append((option['timestamp'], current_price))
+                
+            # Remove entries older than the window_duration
+            while window and (option['timestamp'] - window[0][0]) > window_duration:
+                window.popleft()
             
-            # Generate trading signals
-            thresholds = {0: 1.0, 1: 0.5}  # Example thresholds, adjust as needed
-            signals = self.generate_trading_signals(pca_results, thresholds)
+            # Extract prices within the window for MACD calculation
+            win_prices = [price for _, price in window]
             
-            # Calculate order sizes
-            order_sizes = self.calculate_order_size(signals, max_order_size, portfolio_value)
-            
-            # Generate orders based on signals and order sizes
-            daily_pnl = 0
-            for i, (option_id, signal) in enumerate(signals.iterrows()):
-                if signal.sum() != 0:
-                    option = options_today[options_today['instrument_id'] == greeks_df.index[i]].iloc[0]
-                    order_size = int(order_sizes[i])
-                    action = 'B' if signal.sum() > 0 else 'S'
-                    
-                    orders.append({
-                        'datetime': option['timestamp'].strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
-                        'option_symbol': f"SPX   {option['expiration_date'].strftime('%y%m%d')}{'C' if option['option_type'] == 'Call' else 'P'}{int(option['strike_price']*1000):08d}",
-                        'action': action,
-                        'order_size': order_size,
-                        'stop_loss': option['mid_price'] * (1 - stop_loss_pct) if action == 'B' else option['mid_price'] * (1 + stop_loss_pct),
-                        'take_profit': option['mid_price'] * (1 + take_profit_pct) if action == 'B' else option['mid_price'] * (1 - take_profit_pct)
-                    })
-                    
-                    # Simplified P&L calculation ( a more complex model)
-                    daily_pnl += order_size * (option['mid_price'] * take_profit_pct if action == 'B' else option['mid_price'] * stop_loss_pct)
-            
-            # Update portfolio value and calculate daily return
-            portfolio_value += daily_pnl
-            daily_returns.append(daily_pnl / portfolio_value)
-        
-        result = pd.DataFrame(orders)
-        print(f"Final number of orders generated: {len(result)}")
-        print(result.head(10))
-        
-        # Calculate performance metrics
-        sharpe_ratio = self.calculate_sharpe_ratio(np.array(daily_returns), risk_free_rate)
-        max_drawdown = self.calculate_max_drawdown(pd.Series(daily_returns).cumsum())
-        
-        print(f"Sharpe Ratio: {sharpe_ratio}")
-        print(f"Max Drawdown: {max_drawdown}")
-        
-        return result
+            # Ensure the window has at least 26 data points before calculating MACD
+            if len(win_prices) < 26:
+                print(f"Not enough data in the 30-minute window to calculate MACD for date {date}.")
+                # Depending on your strategy, you might choose to skip MACD calculation or wait for more data
+                continue  # Skip MACD calculation for this date
+            else:
+                try:
+                    macd = self.calculate_macd(win_prices)
+                except ValueError as e:
+                    print(f"MACD calculation error for date {date}: {e}")
+                    continue  # Skip this date if MACD calculation fails
+                
+                # Extract the latest MACD and signal values
+                macd_value = macd['macd'][-1]
+                macd_signal = macd['signal'][-1]
+                print(f"MACD Value: {macd_value}, Signal Value: {macd_signal}")
 
+                # Implement MACD-based trading signals
+                # Example:
+                # If MACD crosses above the signal line, it's a bullish signal (buy)
+                # If MACD crosses below the signal line, it's a bearish signal (sell)
+                # For simplicity, we'll use the latest values to determine the signal
+                if macd_value > macd_signal:
+                    signal = 'buy'
+                elif macd_value < macd_signal:
+                    signal = 'sell'
+                else:
+                    signal = 'hold'
+                
+                print(f"MACD Signal for date {date}: {signal}")
+
+                # Generate orders based on the signal and standardized Greeks
+                for option_id, greeks in greeks_df.iterrows():
+                    if signal == 'buy' and greeks['delta'] > 0.5:
+                        quantity = min(max_order_size, int(portfolio_value // current_price))
+                        if quantity > 0:
+                            order = {
+                                'date': date,
+                                'option_id': option_id,
+                                'action': 'buy',
+                                'quantity': quantity,
+                                'entry_price': current_price,
+                                'stop_loss': current_price * (1 - stop_loss_pct),
+                                'take_profit': current_price * (1 + take_profit_pct)
+                            }
+                            orders.append(order)
+                            portfolio_value -= current_price * quantity
+                            print(f"Generated BUY order: {order}")
+                    
+                    elif signal == 'sell' and greeks['delta'] < -0.5:
+                        quantity = min(max_order_size, int(portfolio_value // current_price))
+                        if quantity > 0:
+                            order = {
+                                'date': date,
+                                'option_id': option_id,
+                                'action': 'sell',
+                                'quantity': quantity,
+                                'entry_price': current_price,
+                                'stop_loss': current_price * (1 + stop_loss_pct),
+                                'take_profit': current_price * (1 - take_profit_pct)
+                            }
+                            orders.append(order)
+                            portfolio_value += current_price * quantity
+                            print(f"Generated SELL order: {order}")
+                
+                # Optionally, handle 'hold' signals or other strategies
+
+            # Update daily_returns or other metrics as needed based on your strategy
+
+        orders_df = pd.DataFrame(orders)
+        print("Generated Orders:")
+        print(orders_df)
+        return orders_df
    
 
     def load_or_parse_options(self, raw_file_path: str, parsed_file_path: str) -> pd.DataFrame:
@@ -472,10 +460,8 @@ class Strategy:
         df['bid_size'] = df['bid_size'].astype(int)
         df['ask_size'] = df['ask_size'].astype(int)
         df['strike_price'] = df['strike_price'].astype(float)
-        df['index'] = df.index + 1
     
         return df[[
-            'index',
             'timestamp',
             'instrument_id',
             'expiration_date',
