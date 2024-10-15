@@ -152,8 +152,6 @@ class Strategy:
         drawdown = (equity_curve - peak) / peak
         return drawdown.min()
 
-    
-    # 
     def black_scholes_call(self, S, K, T, r, sigma):
         d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
         d2 = d1 - sigma * np.sqrt(T)
@@ -163,7 +161,6 @@ class Strategy:
         d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
         d2 = d1 - sigma * np.sqrt(T)
         return K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
-    
 
     def calculate_implied_volatility(self, S, K, T, r, market_price, option_type, plot=False):
         """
@@ -269,22 +266,20 @@ class Strategy:
             # Calculate Greeks for all options
             greeks_list = []
 
-            # print('options')
-            # print(options_today)
+            print('options')
+            print(options_today)
             for _, option in options_today.iterrows():
                 # print('option: ')
                 # print(option)
                 
                 option_timestamp = option['time']
-                print('option_timestamp')
-                print(option_timestamp)
                 # print('option_timestamp')
                 # print(option_timestamp)
                 idx = bisect.bisect_right(date_list, option_timestamp) - 1
 
                 if idx >= 0:
                     current_price = current_prices.iloc[idx]['adj close']
-                    print(current_price)
+                    # print(current_price)
                     # print(f'Option timestamp: {option_timestamp}, Closest adj close: {current_price}')
                 else:
                     print(f'No earlier data for option timestamp: {option_timestamp}')
@@ -315,6 +310,16 @@ class Strategy:
                 if greeks:
                     greeks['option_id'] = option['instrument_id']
                     greeks_list.append(greeks)
+                
+                # Update the window with the current timestamp and price
+                # TODO
+                # print('options_today')
+                print(option['timestamp'])
+                window.append((option['timestamp'], current_price))
+                print(window)   
+                # Remove entries older than the window_duration
+                while window and (option['timestamp'] - window[0][0]) > window_duration:
+                    window.popleft()
             
             if not greeks_list:
                 print(f"No valid Greeks calculated for date {date}. Skipping this date.")
@@ -322,15 +327,7 @@ class Strategy:
 
             greeks_df = pd.DataFrame(greeks_list).set_index('option_id')
 
-            # Update the window with the current timestamp and price
-            # TODO
-            # print('options_today')
-            # print(options_today['timestamp'])
-            window.append((option['timestamp'], current_price))
-                
-            # Remove entries older than the window_duration
-            while window and (option['timestamp'] - window[0][0]) > window_duration:
-                window.popleft()
+            
             
             # Extract prices within the window for MACD calculation
             win_prices = [price for _, price in window]
@@ -380,6 +377,8 @@ class Strategy:
                                 'stop_loss': current_price * (1 - stop_loss_pct),
                                 'take_profit': current_price * (1 + take_profit_pct)
                             }
+                            
+                            #if date != and order_size <= int(row["ask_size"]) or order_size <= int(row["bid_size"]):
                             orders.append(order)
                             portfolio_value -= current_price * quantity
                             print(f"Generated BUY order: {order}")
