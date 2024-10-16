@@ -342,14 +342,14 @@ class Strategy:
                 continue  # Skip MACD calculation for this date
             else:
                 try:
-                    macd = self.calculate_macd(win_prices)
+                    macd, signal = self.calculate_macd(win_prices)
                 except ValueError as e:
                     print(f"MACD calculation error for date {date}: {e}")
                     continue  # Skip this date if MACD calculation fails
                 
                 # Extract the latest MACD and signal values
-                macd_value = macd['macd'][-1]
-                macd_signal = macd['signal'][-1]
+                macd_value = macd.iloc[-1]
+                macd_signal = signal.iloc[-1]
                 print(f"MACD Value: {macd_value}, Signal Value: {macd_signal}")
 
                 # Implement MACD-based trading signals
