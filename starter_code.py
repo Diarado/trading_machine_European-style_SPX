@@ -33,8 +33,12 @@ class Strategy:
         columns_to_scale = ['open', 'high', 'low', 'close', 'adj close']
         self.underlying[columns_to_scale] = self.underlying[columns_to_scale] / 100
         
-        self.spx_minute_data : pd.DataFrame = pd.read_csv("data/spx_minute_level_data_jan_mar_2024").copy()
-        self.spx_minute_data['price'] = self.spx_minute_data['price'] / 100
+        self.spx_minute_data: pd.DataFrame = pd.read_csv("data/spx_minute_level_data_jan_mar_2024.csv").copy()
+
+        # Convert the ms_of_day into a time format (milliseconds to timedelta)
+        self.spx_minute_data['ms_of_day'] = pd.to_timedelta(self.spx_minute_data['ms_of_day'], unit='ms')
+        # Convert the 'date' column to datetime format (assuming 'YYYYMMDD' format)
+        self.spx_minute_data['date'] = pd.to_datetime(self.spx_minute_data['date'], format='%Y%m%d')
         # print(self.underlying)
         self.idx = 0
         
@@ -152,70 +156,67 @@ class Strategy:
         ema_slow = prices.ewm(span=slow, adjust=False).mean()
         macd = ema_fast - ema_slow
         signal_line = macd.ewm(span=signal, adjust=False).mean()
+        
         return macd, signal_line
     
     
     def generate_orders(self) -> pd.DataFrame:
+        # Load or parse the options data
         parsed_options = self.load_or_parse_options("data/cleaned_options_data.csv", 
                                                     "data/parsed_options_data.pkl")
         
-        risk_free_rate = 0.03 # predetermined
-        max_order_size = 100 # TODO: to be adjusted
-        stop_loss_pct = 0.05 # TODO.
-        take_profit_pct = 0.10 # TODO.
+        risk_free_rate = 0.03  # predetermined risk-free rate
+        max_order_size = 100   # Adjustable maximum order size
+        stop_loss_pct = 0.05   # Stop loss percentage
+        take_profit_pct = 0.10 # Take profit percentage
         
         orders = []
         portfolio_value = self.capital
         daily_returns = []
         
+        # Window for analyzing recent 26 price movements
+        win_len = 26
         window = deque()
-        window_duration = timedelta(minutes=30)
         
-        for date in parsed_options['timestamp'].dt.date.unique():
-            # print('date: ' + str(date))
-            options_today = parsed_options[parsed_options['timestamp'].dt.date == date]
-            underlying_today = self.underlying[self.underlying['date'].dt.date == date]
-            print('underlying_today: ')
-            print(underlying_today)
-            if len(underlying_today) == 0:
+        cur_idx = 0  # Index pointer for parsed_options
+        num_options = len(parsed_options)  # Total number of options
+        
+        for i, line in self.spx_minute_data.iterrows():
+            minute = line['ms_of_day']
+            date = line['date']
+            current_price = line['price']
+            
+            # Filtering options within the given time window for the current minute
+            options_today = []
+            while cur_idx < num_options and parsed_options['timestamp'].iloc[cur_idx] < minute + 6000:
+                options_today.append(parsed_options.iloc[cur_idx]) 
+                window.append(parsed_options['price'].iloc[cur_idx])
+                while len(window) > 26:
+                    window.popleft()
+                cur_idx += 1
+            
+            # Example calculation of Greeks (use appropriate method for actual calculations)
+            greeks_list = []        
+            
+            if i == 0: # skip the very first minute
                 continue
             
-            current_prices = underlying_today[['date', 'adj close']].copy()
-            current_prices['time'] = current_prices['date'].dt.time
-            
-            options_today = options_today.copy()
-            options_today['time'] = options_today['timestamp'].dt.time
-            
-            date_list = current_prices['time'].tolist()
-            # print('dates: ')
-            # print(date_list)
-            # Calculate Greeks for all options
-            greeks_list = []
-
-            print('options')
-            print(options_today)
-            for _, option in options_today.iterrows():
+            try:
+                macd, signal_line = self.calculate_macd(window)
+            except ValueError:
+                print(f"MACD calculation error")
+                continue  # Skip this date if MACD calculation fails
+                    
+            # starting from 2 minute
+            for j, option in options_today.iterrows(): # options_today = options_tominute around 300 options
                 # print('option: ')
                 # print(option)
-                
-                option_timestamp = option['time']
-                # print('option_timestamp')
-                # print(option_timestamp)
-                idx = bisect.bisect_right(date_list, option_timestamp) - 1
-
-                if idx >= 0:
-                    current_price = current_prices.iloc[idx]['adj close']
-                    # print(current_price)
-                    # print(f'Option timestamp: {option_timestamp}, Closest adj close: {current_price}')
-                else:
-                    print(f'No earlier data for option timestamp: {option_timestamp}')
-                    continue
-                
-                
+                 
                 days_to_expiration = (option['expiration_date'] - date).days
+                
                 if days_to_expiration <= 0:
                     print(f"Option {option['instrument_id']} has expired. Skipping.")
-                    continue  # Skip expired options
+                    continue  
                 
                 T = days_to_expiration / 365.0
                 
@@ -231,23 +232,12 @@ class Strategy:
                 greeks = self.compute_option_greeks(current_price, option['strike_price'], 
                                                     T, risk_free_rate, implied_vol, 
                                                     option['option_type'])
-                # print(greeks)
-               
+                # print(greeks)      
                 if greeks:
                     greeks['option_id'] = option['instrument_id']
                     greeks['option_symbol'] = option['option_symbol']
                     greeks_list.append(greeks)
                 
-                # Update the window with the current timestamp and price
-                # TODO
-                # print('options_today')
-                print(option['timestamp'])
-                window.append((option['timestamp'], current_price))
-                # print(window)   
-                # Remove entries older than the window_duration
-                while window and (option['timestamp'] - window[0][0]) > window_duration:
-                    window.popleft()
-            
                 if not greeks_list:
                     print(f"No valid Greeks calculated for date {date}. Skipping this date.")
                     continue
@@ -255,73 +245,58 @@ class Strategy:
                 greeks_df = pd.DataFrame(greeks_list).set_index('option_symbol')
                 print(greeks_df)
                 
-                
-                # Extract prices within the window for MACD calculation
-                win_prices = [price for _, price in window]
-                
-                # Ensure the window has at least 26 data points before calculating MACD
-                if len(win_prices) < 26:
-                    print(f"Not enough data in the 30-minute window to calculate MACD for date {date}.")
-                    # Depending on your strategy, you might choose to skip MACD calculation or wait for more data
-                    continue  # Skip MACD calculation for this date
+
+                # Extract the latest MACD and signal values
+                macd_value = macd.iloc[-1]
+                macd_signal = signal.iloc[-1]
+                print(f"MACD Value: {macd_value}, Signal Value: {macd_signal}")
+
+                # Implement MACD-based trading signals
+                # Example:
+                # If MACD crosses above the signal line, it's a bullish signal (buy)
+                # If MACD crosses below the signal line, it's a bearish signal (sell)
+                # For simplicity, we'll use the latest values to determine the signal
+                if macd_value > macd_signal:
+                    signal = 'buy'
+                elif macd_value < macd_signal:
+                    signal = 'sell'
                 else:
-                    try:
-                        macd, signal = self.calculate_macd(win_prices)
-                    except ValueError as e:
-                        print(f"MACD calculation error for date {date}: {e}")
-                        continue  # Skip this date if MACD calculation fails
-                    
-                    # Extract the latest MACD and signal values
-                    macd_value = macd.iloc[-1]
-                    macd_signal = signal.iloc[-1]
-                    print(f"MACD Value: {macd_value}, Signal Value: {macd_signal}")
+                    signal = 'hold'
+                
+                print(f"MACD Signal for date {date}: {signal}")
 
-                    # Implement MACD-based trading signals
-                    # Example:
-                    # If MACD crosses above the signal line, it's a bullish signal (buy)
-                    # If MACD crosses below the signal line, it's a bearish signal (sell)
-                    # For simplicity, we'll use the latest values to determine the signal
-                    if macd_value > macd_signal:
-                        signal = 'buy'
-                    elif macd_value < macd_signal:
-                        signal = 'sell'
-                    else:
-                        signal = 'hold'
+                # Generate orders based on the signal and standardized Greeks
+                for option_id, greeks in greeks_df.iterrows():
+                    if signal == 'buy' and greeks['delta'] > 0.5:
+                        quantity = min(max_order_size, int(portfolio_value // current_price))
+                        if quantity > 0:
+                            order = {
+                                'datetime': option['timestamp'],
+                                'option_id': option_id,
+                                'action': 'B',
+                                'quantity': quantity,
+                            }
+                            
+                            #if date != and order_size <= int(row["ask_size"]) or order_size <= int(row["bid_size"]):
+                            orders.append(order)
+                            portfolio_value -= current_price * quantity
+                            print(f"Generated BUY order: {order}")
                     
-                    print(f"MACD Signal for date {date}: {signal}")
-
-                    # Generate orders based on the signal and standardized Greeks
-                    for option_id, greeks in greeks_df.iterrows():
-                        if signal == 'buy' and greeks['delta'] > 0.5:
-                            quantity = min(max_order_size, int(portfolio_value // current_price))
-                            if quantity > 0:
-                                order = {
-                                    'datetime': option['timestamp'],
-                                    'option_id': option_id,
-                                    'action': 'B',
-                                    'quantity': quantity,
-                                }
-                                
-                                #if date != and order_size <= int(row["ask_size"]) or order_size <= int(row["bid_size"]):
-                                orders.append(order)
-                                portfolio_value -= current_price * quantity
-                                print(f"Generated BUY order: {order}")
-                        
-                        elif signal == 'sell' and greeks['delta'] < -0.5:
-                            quantity = min(max_order_size, int(portfolio_value // current_price))
-                            if quantity > 0:
-                                order = {
-                                    'datetime': option['timestamp'],
-                                    'option_id': option_id,
-                                    'action': 'S',
-                                    'quantity': quantity,
-                                }
-                                orders.append(order)
-                                portfolio_value += current_price * quantity
-                                print(f"Generated SELL order: {order}")
-                    
-                    # Optionally, handle 'hold' signals or other strategies
-                # Update daily_returns or other metrics as needed based on your strategy
+                    elif signal == 'sell' and greeks['delta'] < -0.5:
+                        quantity = min(max_order_size, int(portfolio_value // current_price))
+                        if quantity > 0:
+                            order = {
+                                'datetime': option['timestamp'],
+                                'option_id': option_id,
+                                'action': 'S',
+                                'quantity': quantity,
+                            }
+                            orders.append(order)
+                            portfolio_value += current_price * quantity
+                            print(f"Generated SELL order: {order}")
+                
+                # Optionally, handle 'hold' signals or other strategies
+            # Update daily_returns or other metrics as needed based on your strategy
 
 
         orders_df = pd.DataFrame(orders)
