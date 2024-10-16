@@ -34,12 +34,17 @@ class Strategy:
         self.underlying[columns_to_scale] = self.underlying[columns_to_scale] / 100
         
         self.spx_minute_data: pd.DataFrame = pd.read_csv("data/spx_minute_level_data_jan_mar_2024.csv").copy()
-
+        self.spx_minute_data['price'] = self.spx_minute_data['price'] / 100
         # Convert the ms_of_day into a time format (milliseconds to timedelta)
         self.spx_minute_data['ms_of_day'] = pd.to_timedelta(self.spx_minute_data['ms_of_day'], unit='ms')
-        # Convert the 'date' column to datetime format (assuming 'YYYYMMDD' format)
-        self.spx_minute_data['date'] = pd.to_datetime(self.spx_minute_data['date'], format='%Y%m%d')
-        # print(self.underlying)
+        
+        # **Add this line to convert ms_of_day from ET to UTC by adding 5 hours**
+        self.spx_minute_data['ms_of_day'] += pd.Timedelta(hours=5)
+        
+        # Convert the 'date' column to datetime format ('YYYYMMDD' format) in UTC
+        self.spx_minute_data['date'] = pd.to_datetime(self.spx_minute_data['date'], format='%Y%m%d', utc=True)
+        self.spx_minute_data['date'] = self.spx_minute_data['date'].dt.tz_localize(None)
+        
         self.idx = 0
         
     def standardize(self, X):
@@ -178,46 +183,56 @@ class Strategy:
         
         # Window for analyzing recent 26 price movements
         win_len = 26
-        window = deque()
+        window = deque(self.spx_minute_data['price'].iloc[:27])
         
         cur_idx = 0  # Index pointer for parsed_options
         num_options = len(parsed_options)  # Total number of options
         
-        for i, line in self.spx_minute_data.iterrows():
+        for i, line in self.spx_minute_data.iloc[26:].iterrows():
             minute = line['ms_of_day']
             date = line['date']
             current_price = line['price'] 
             
             current_time = pd.Timestamp(date) + minute
-    
-            # Filtering options within the given time window for the current minute
-            options_today = []
-            while cur_idx < num_options and parsed_options['timestamp'].iloc[cur_idx] < current_time + pd.Timedelta(milliseconds=6000):
-                options_today.append(parsed_options.iloc[cur_idx]) 
-                window.append(parsed_options['price'].iloc[cur_idx])
-                while len(window) > 26:
-                    window.popleft()
-                cur_idx += 1
-            
-            options_today = pd.DataFrame(options_today)
-            # Example calculation of Greeks (use appropriate method for actual calculations)
-            greeks_list = []        
-            
-            if i == 0: # skip the very first minute
-                continue
             
             try:
                 macd, signal_line = self.calculate_macd(window)
             except ValueError:
                 print(f"MACD calculation error")
                 continue  # Skip this date if MACD calculation fails
-                    
-            # starting from 2 minute
+
+            print('current_time: ')
+            print(current_time)
+            # Filtering options within the given time window for the current minute
+            options_today = []
+            window.append(current_price)
+            
+            while len(window) > win_len:
+                window.popleft()
+            
+            while cur_idx < num_options and parsed_options['timestamp'].iloc[cur_idx] < current_time:
+                cur_idx += 1
+                
+            while cur_idx < num_options and parsed_options['timestamp'].iloc[cur_idx] < current_time + pd.Timedelta(milliseconds=6000):
+                options_today.append(parsed_options.iloc[cur_idx]) 
+                cur_idx += 1
+            
+            
+            options_today = pd.DataFrame(options_today)
+            # Example calculation of Greeks (use appropriate method for actual calculations)
+            greeks_list = []        
+            print(window)
+
+            
             for j, option in options_today.iterrows(): # options_today = options_tominute around 300 options
                 # print('option: ')
                 # print(option)
-                 
-                days_to_expiration = (option['expiration_date'] - date).days
+        
+                expiration_date = pd.to_datetime(option['expiration_date'])
+                timestamp = pd.to_datetime(option['timestamp'])
+    
+                # Calculate days to expiration
+                days_to_expiration = (expiration_date - timestamp).days
                 
                 if days_to_expiration <= 0:
                     print(f"Option {option['instrument_id']} has expired. Skipping.")
