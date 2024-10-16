@@ -156,7 +156,9 @@ class Strategy:
         ema_slow = prices.ewm(span=slow, adjust=False).mean()
         macd = ema_fast - ema_slow
         signal_line = macd.ewm(span=signal, adjust=False).mean()
-        
+        print(len(macd))
+        print("length")
+        print(len(signal_line))
         return macd, signal_line
     
     
@@ -184,17 +186,20 @@ class Strategy:
         for i, line in self.spx_minute_data.iterrows():
             minute = line['ms_of_day']
             date = line['date']
-            current_price = line['price']
+            current_price = line['price'] 
             
+            current_time = pd.Timestamp(date) + minute
+    
             # Filtering options within the given time window for the current minute
             options_today = []
-            while cur_idx < num_options and parsed_options['timestamp'].iloc[cur_idx] < minute + 6000:
+            while cur_idx < num_options and parsed_options['timestamp'].iloc[cur_idx] < current_time + pd.Timedelta(milliseconds=6000):
                 options_today.append(parsed_options.iloc[cur_idx]) 
                 window.append(parsed_options['price'].iloc[cur_idx])
                 while len(window) > 26:
                     window.popleft()
                 cur_idx += 1
             
+            options_today = pd.DataFrame(options_today)
             # Example calculation of Greeks (use appropriate method for actual calculations)
             greeks_list = []        
             
