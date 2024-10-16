@@ -223,11 +223,14 @@ class Strategy:
             return None
 
     def calculate_macd(self, prices, slow=26, fast=12, signal=9):
+        if not isinstance(prices, pd.Series):
+            prices = pd.Series(prices)
         ema_fast = prices.ewm(span=fast, adjust=False).mean()
         ema_slow = prices.ewm(span=slow, adjust=False).mean()
         macd = ema_fast - ema_slow
         signal_line = macd.ewm(span=signal, adjust=False).mean()
         return macd, signal_line
+    
     
     def generate_orders(self) -> pd.DataFrame:
         parsed_options = self.load_or_parse_options("data/cleaned_options_data.csv", 
@@ -403,6 +406,7 @@ class Strategy:
 
             # Update daily_returns or other metrics as needed based on your strategy
 
+
         orders_df = pd.DataFrame(orders)
         print("Generated Orders:")
         print(orders_df)
@@ -527,6 +531,135 @@ class Strategy:
             rho = -K * T * np.exp(-r * T) * norm.cdf(-d2) / 100
         return rho  
    
+
+
+'''''
+generate orders function (Todo: update the trading signals funcion)
+
+def generate_orders(self) -> pd.DataFrame:
+    parsed_options = self.load_or_parse_options("data/cleaned_options_data.csv", "data/parsed_options_data.pkl")
+    
+    risk_free_rate = 0.03  # predetermined
+    max_order_size = 100  # Adjust as needed
+    stop_loss_pct = 0.05  # Adjust as needed
+    take_profit_pct = 0.10  # Adjust as needed
+
+    orders = []
+    portfolio_value = self.capital
+    
+    for date in parsed_options['timestamp'].dt.date.unique():
+        options_today = parsed_options[parsed_options['timestamp'].dt.date == date]
+        underlying_today = self.underlying[self.underlying['date'].dt.date == date]
+        
+        if len(underlying_today) == 0:
+            continue
+        
+        current_prices = underlying_today[['date', 'adj close']].copy()
+        current_prices['time'] = current_prices['date'].dt.time
+        options_today = options_today.copy()
+        options_today['time'] = options_today['timestamp'].dt.time
+        
+        date_list = current_prices['time'].tolist()
+
+        greeks_list = []
+        for _, option in options_today.iterrows():
+            option_timestamp = option['time']
+            idx = bisect.bisect_right(date_list, option_timestamp) - 1
+            
+            if idx >= 0:
+                current_price = current_prices.iloc[idx]['adj close']
+            else:
+                continue
+
+            # Find the closest available strike price
+            available_strikes = options_today['strike_price'].unique()
+            closest_strike = self.find_closest_strike(current_price, available_strikes)
+
+            days_to_expiration = (option['expiration_date'] - date).days
+            if days_to_expiration <= 0:
+                continue
+            
+            T = days_to_expiration / 365.0
+            implied_vol = self.calculate_implied_volatility(current_price, closest_strike, 
+                                                            T, risk_free_rate, option['mid_price'], 
+                                                            option['option_type'])
+            greeks = self.compute_option_greeks(current_price, closest_strike, T, risk_free_rate, implied_vol, option['option_type'])
+            
+            if greeks:
+                greeks['option_id'] = option['instrument_id']
+                greeks_list.append(greeks)
+        
+        if not greeks_list:
+            continue
+        
+        greeks_df = pd.DataFrame(greeks_list).set_index('option_id')
+
+        # Placeholder for actual signal detection logic
+        market_signal = self.detect_market_signal()  
+
+        if market_signal == 'bull':
+            # Bull Call Spread
+            for option_id, greeks in greeks_df.iterrows():
+                if greeks['delta'] > 0.3:  
+                    # Buy call with lower strike, sell call with higher strike
+                    order_buy = self.create_order(option_id, 'buy', greeks, closest_strike)
+                    orders.append(order_buy)
+                    higher_strike = self.find_closest_strike(current_price + 2, available_strikes)  # Arbitrary +2 strike difference
+                    order_sell = self.create_order(option_id, 'sell', greeks, higher_strike)
+                    orders.append(order_sell)
+
+        elif market_signal == 'bear':
+            # Bear Put Spread
+            for option_id, greeks in greeks_df.iterrows():
+                if greeks['delta'] < -0.3: 
+                    # Buy put with higher strike, sell put with lower strike
+                    order_buy = self.create_order(option_id, 'buy', greeks, closest_strike)
+                    orders.append(order_buy)
+                    lower_strike = self.find_closest_strike(current_price - 2, available_strikes)  # Arbitrary -2 strike difference
+                    order_sell = self.create_order(option_id, 'sell', greeks, lower_strike)
+                    orders.append(order_sell)
+
+        elif market_signal == 'near_expiration':
+            # Iron Condor (low volatility, near expiration)
+            for option_id, greeks in greeks_df.iterrows():
+                if greeks['delta'] > 0.3: 
+                    # Sell OTM call and buy deeper OTM call
+                    otm_strike = self.find_closest_strike(current_price + 1, available_strikes)
+                    deeper_otm_strike = self.find_closest_strike(current_price + 2, available_strikes)
+                    order_sell = self.create_order(option_id, 'sell', greeks, otm_strike)
+                    orders.append(order_sell)
+                    order_buy = self.create_order(option_id, 'buy', greeks, deeper_otm_strike)
+                    orders.append(order_buy)
+                elif greeks['delta'] < -0.3: 
+                    # Sell OTM put and buy deeper OTM put
+                    otm_strike = self.find_closest_strike(current_price - 1, available_strikes)
+                    deeper_otm_strike = self.find_closest_strike(current_price - 2, available_strikes)
+                    order_sell = self.create_order(option_id, 'sell', greeks, otm_strike)
+                    orders.append(order_sell)
+                    order_buy = self.create_order(option_id, 'buy', greeks, deeper_otm_strike)
+                    orders.append(order_buy)
+
+        elif market_signal == 'high_volatility':
+            # Straddle (expecting significant market movement)
+            for option_id, greeks in greeks_df.iterrows():
+                # Buy both call and put
+                if greeks['delta'] > 0.3:  
+                    order_call = self.create_order(option_id, 'buy', greeks, closest_strike)
+                    orders.append(order_call)
+                elif greeks['delta'] < -0.3:  
+                    order_put = self.create_order(option_id, 'buy', greeks, closest_strike)
+                    orders.append(order_put)
+
+        # Update portfolio value based on current orders and generated trades
+        self.update_portfolio_value(orders)
+
+    orders_df = pd.DataFrame(orders)
+    return orders_df
+
+'''''
+
+
+
       
 st = Strategy()
 st.generate_orders()
