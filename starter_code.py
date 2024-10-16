@@ -122,7 +122,26 @@ class Strategy:
         macd = ema_fast - ema_slow
         signal_line = macd.ewm(span=signal, adjust=False).mean()
         return macd, signal_line
+    
+    def create_order(self, option_id, action, greeks, strike_price, option):
+        if option == 'call':
+            print('TODO')
+        else:
+            print('TODO')
+        order_size = max(1, int(100 * abs(greeks['delta']))) 
+        order = {
+            'datetime': pd.Timestamp.now(), # Todo: need adjusted
+            'option_symbol': option_id,
+            'action': 'B' if action == 'buy' else 'S',
+            'order_size': order_size # Todo: need adjusted
+        }
+        return order
 
+    def find_closest_strike(self, current_price, available_strikes):
+
+        closest_strike = min(available_strikes, key=lambda strike: abs(strike - current_price))
+        return closest_strike
+    
     def generate_orders(self) -> pd.DataFrame:
         parsed_options = self.load_or_parse_options("data/cleaned_options_data.csv", "data/parsed_options_data.pkl")
         
@@ -149,6 +168,12 @@ class Strategy:
             
             current_time = pd.Timestamp(date) + minute
 
+            try:
+                macd, signal = self.calculate_macd(window)
+            except ValueError:
+                print("MACD calculation error")
+                continue
+            
             options_today = []
             window.append(current_price)
             
@@ -193,7 +218,6 @@ class Strategy:
 
                 greeks_df = pd.DataFrame(greeks_list).set_index('option_symbol')
                 print(greeks_df)
-                
 
                 # Extract the latest MACD and signal values
                 macd_value = macd.iloc[-1]
@@ -209,11 +233,11 @@ class Strategy:
                     for option_id, greeks in greeks_df.iterrows():
                         if greeks['delta'] > 0.3:
                             # Buy call with lower strike
-                            order_buy = self.create_order(option_id, 'buy', greeks, greeks['strike_price'])
+                            order_buy = self.create_order(option_id, 'buy', greeks, greeks['strike_price'], 'call')
                             orders.append(order_buy)
                             # Sell call with higher strike
                             higher_strike = self.find_closest_strike(current_price + 2, options_today['strike_price'].unique())  # Arbitrary +2 strike difference
-                            order_sell = self.create_order(option_id, 'sell', greeks, higher_strike)
+                            order_sell = self.create_order(option_id, 'sell', greeks, higher_strike, 'call')
                             orders.append(order_sell)
 
                 elif market_signal == 'bear':
@@ -221,11 +245,11 @@ class Strategy:
                     for option_id, greeks in greeks_df.iterrows():
                         if greeks['delta'] < -0.3:
                             # Buy put with higher strike
-                            order_buy = self.create_order(option_id, 'buy', greeks, greeks['strike_price'])
+                            order_buy = self.create_order(option_id, 'buy', greeks, greeks['strike_price'], 'put')
                             orders.append(order_buy)
                             # Sell put with lower strike
                             lower_strike = self.find_closest_strike(current_price - 2, options_today['strike_price'].unique())  # Arbitrary -2 strike difference
-                            order_sell = self.create_order(option_id, 'sell', greeks, lower_strike)
+                            order_sell = self.create_order(option_id, 'sell', greeks, lower_strike, 'put')
                             orders.append(order_sell)
 
                 elif market_signal == 'near_expiration':
@@ -235,17 +259,17 @@ class Strategy:
                         # Sell OTM call and buy deeper OTM call
                             otm_strike = self.find_closest_strike(current_price + 1, options_today['strike_price'].unique())
                             deeper_otm_strike = self.find_closest_strike(current_price + 2, options_today['strike_price'].unique())
-                            order_sell = self.create_order(option_id, 'sell', greeks, otm_strike)
+                            order_sell = self.create_order(option_id, 'sell', greeks, otm_strike, 'call')
                             orders.append(order_sell)
-                            order_buy = self.create_order(option_id, 'buy', greeks, deeper_otm_strike)
+                            order_buy = self.create_order(option_id, 'buy', greeks, deeper_otm_strike, 'call')
                             orders.append(order_buy)
                         elif greeks['delta'] < -0.3:
                             # Sell OTM put and buy deeper OTM put
                             otm_strike = self.find_closest_strike(current_price - 1, options_today['strike_price'].unique())
                             deeper_otm_strike = self.find_closest_strike(current_price - 2, options_today['strike_price'].unique())
-                            order_sell = self.create_order(option_id, 'sell', greeks, otm_strike)
+                            order_sell = self.create_order(option_id, 'sell', greeks, otm_strike, 'put')
                             orders.append(order_sell)
-                            order_buy = self.create_order(option_id, 'buy', greeks, deeper_otm_strike)
+                            order_buy = self.create_order(option_id, 'buy', greeks, deeper_otm_strike, 'put')
                             orders.append(order_buy)
 
                 elif market_signal == 'high_volatility':
@@ -253,14 +277,11 @@ class Strategy:
                     for option_id, greeks in greeks_df.iterrows():
                         # Buy both call and put
                         if greeks['delta'] > 0.3:
-                            order_call = self.create_order(option_id, 'buy', greeks, greeks['strike_price'])
+                            order_call = self.create_order(option_id, 'buy', greeks, greeks['strike_price'], 'call')
                             orders.append(order_call)
                         elif greeks['delta'] < -0.3:
-                            order_put = self.create_order(option_id, 'buy', greeks, greeks['strike_price'])
+                            order_put = self.create_order(option_id, 'buy', greeks, greeks['strike_price'], 'put')
                             orders.append(order_put)
-
-                # Update portfolio value based on current orders and generated trades
-                self.update_portfolio_value(orders)
 
         orders_df = pd.DataFrame(orders)
         print("Generated Orders:")
