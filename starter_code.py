@@ -149,7 +149,7 @@ class Strategy:
         order_size = self.calculate_order_size(option_premium, bid_size, ask_size, action)
 
         order = {
-            'datetime': timestamp.strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z',
+            'datetime': timestamp.strftime('%Y-%m-%dT%H:%M:%S') + f'.{timestamp.nanosecond:09d}' + 'Z',
             'option_symbol': option_symbol,
             'action': 'B' if action == 'buy' else 'S',
             'order_size': order_size
@@ -483,5 +483,5 @@ class Strategy:
         return rho  
    
   
-st = Strategy()
-st.generate_orders()
+# st = Strategy()
+# st.generate_orders()
