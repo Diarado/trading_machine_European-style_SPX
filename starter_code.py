@@ -42,17 +42,21 @@ class Strategy:
         self.spx_minute_data['date'] = pd.to_datetime(self.spx_minute_data['date'], format='%Y%m%d', utc=True)
         self.spx_minute_data['date'] = self.spx_minute_data['date'].dt.tz_localize(None)
         
+        self.spx_minute_data['log_return'] = np.log(self.spx_minute_data['price'] / self.spx_minute_data['price'].shift(1))
+        window_size = 26
+        self.spx_minute_data['volatility'] = self.spx_minute_data['log_return'].rolling(window=window_size).std() * np.sqrt(window_size)
+        self.spx_minute_data = self.spx_minute_data.replace([np.inf, -np.inf], np.nan)  # Replace inf with NaN
+        self.spx_minute_data = self.spx_minute_data.dropna()
+        self.spx_minute_data['volatility'] = self.spx_minute_data['volatility']*1000
         self.idx = 0
-
-    def detect_market_signal(self, macd_value, macd_signal, avg_vega, days_to_expiration):
-        if macd_value > macd_signal and avg_vega < 0.3:
+    
+    def detect_market_signal(self, macd_value, macd_signal, vol):
+        if macd_value > macd_signal:
             return 'bull'
-        elif macd_value < macd_signal and avg_vega < 0.3:
+        elif macd_value < macd_signal:
             return 'bear'
-        elif avg_vega >= 0.3:
+        elif vol >= 2.2:
             return 'high_volatility'
-        elif days_to_expiration <= 3:
-            return 'near_expiration'
         return 'neutral'
 
     def calculate_order_size(self, signals, max_order_size, portfolio_value):
@@ -123,23 +127,35 @@ class Strategy:
         signal_line = macd.ewm(span=signal, adjust=False).mean()
         return macd, signal_line
     
-    def create_order(self, option_id, action, greeks, strike_price, option_symbol):
+    def create_order(self, timestamp, option_symbol, action, delta):
  
-        order_size = max(1, int(100 * abs(greeks['delta'])))  
-
+        order_size = max(1, int(100 * abs(delta)))  # TODO
+        option_symbol = option_symbol
         order = {
-        'datetime': pd.Timestamp.now().isoformat(),  # Adjust datetime to match the example
+        'datetime': timestamp,
         'option_symbol': option_symbol,
         'action': 'B' if action == 'buy' else 'S', 
         'order_size': order_size
         }
     
         return order
+    # return a list of parsed options with the closest strike_price
+    # example: [  ...strike_price = P...]
+    #          [  ..strike_proce = P...] 
 
-    def find_closest_strike(self, current_price, available_strikes):
+    def find_closest_strike(self, cur_expire_date, current_price, options_today):
+        available_strikes = options_today[options_today['expiration_date'] == cur_expire_date]
+        if available_strikes.empty:
+            return pd.Series()
+        else:
+            available_strikes['price_diff'] = (available_strikes['strike_price'] - current_price).abs()
+            # Find the index of the row with the minimum difference
+            min_index = available_strikes['price_diff'].idxmin()
+            
+            # Return the row with the minimum strike price difference
+            return available_strikes.loc[min_index]
 
-        closest_strike = min(available_strikes, key=lambda strike: abs(strike - current_price))
-        return closest_strike
+    
     
     def generate_orders(self) -> pd.DataFrame:
         parsed_options = self.load_or_parse_options("data/cleaned_options_data.csv", "data/parsed_options_data.pkl")
@@ -156,7 +172,29 @@ class Strategy:
         # Window for analyzing recent 26 price movements
         win_len = 26
         window = deque(self.spx_minute_data['price'].iloc[:27])
+        # window_options = [] # (timestamp, [timestamp, ..... strike_price, ...])
         
+        #     'timestamp',
+        #     'instrument_id',
+        #     'option_symbol',
+        #     'expiration_date',
+        #     'option_type',
+        #     'strike_price',
+        #     'bid_price',
+        #     'ask_price',
+        #     'bid_size',
+        #     'ask_size',
+        #     'mid_price',
+        #     'spread'
+        # initialize:
+        # ii = 0
+        # while ii < len(parsed_options):
+        #     line = parsed_options[ii]
+        #     if line['timestamp'] >= pd.Timestamp(2024, 1, 2) + pd.Timedelta(milliseconds=35760000):
+        #         break  
+        #     window_options.append((line['timestamp'], line))
+        #     ii += 1
+
         cur_idx = 0  # Index pointer for parsed_options
         num_options = len(parsed_options)  # Total number of options
         
@@ -165,7 +203,7 @@ class Strategy:
             date = line['date']
             current_price = line['price']
             
-            current_time = pd.Timestamp(date) + minute
+            current_time = pd.to_datetime(date) + pd.to_timedelta(minute, unit='ms')
 
             try:
                 macd, signal = self.calculate_macd(window)
@@ -173,114 +211,130 @@ class Strategy:
                 print("MACD calculation error")
                 continue
             
-            options_today = []
+            options_today = [] # it's actually options to_minute
             window.append(current_price)
             
             while len(window) > win_len:
                 window.popleft()
             
+            # Compute the threshold time for 26-minute window in milliseconds
+            # thres = current_time - pd.Timedelta(minutes=26)
+            
+            # Use bisect on the timestamp (first element of the tuple in window_options)
+            # idx = bisect.bisect_right([x[0] for x in window_options], thres)
+            
+            # Remove options that are older than the threshold time
+            # window_options = window_options[idx:]
+            
             while cur_idx < num_options and parsed_options['timestamp'].iloc[cur_idx] < current_time:
                 cur_idx += 1
                 
-            while cur_idx < num_options and parsed_options['timestamp'].iloc[cur_idx] < current_time + pd.Timedelta(milliseconds=6000):
+            while cur_idx < num_options and parsed_options['timestamp'].iloc[cur_idx] < current_time + pd.Timedelta(milliseconds=6000): # all options within 1 min
                 options_today.append(parsed_options.iloc[cur_idx]) 
                 cur_idx += 1
             
-            options_today = pd.DataFrame(options_today)
-            greeks_list = []        
-            
+            options_today = pd.DataFrame(options_today)       
+                
+            # use model to do determine which option to buy from options_today (tominute)
             for j, option in options_today.iterrows(): 
                 expiration_date = pd.to_datetime(option['expiration_date'])
                 timestamp = pd.to_datetime(option['timestamp'])
                 days_to_expiration = (expiration_date - timestamp).days
-                
+
                 if days_to_expiration <= 0:
-                    continue  
-                
+                    continue
+
                 T = days_to_expiration / 365.0
-                
-                implied_vol = self.calculate_implied_volatility(current_price, option['strike_price'], 
-                                                                T, risk_free_rate, option['mid_price'], 
+
+                implied_vol = self.calculate_implied_volatility(current_price, option['strike_price'],
+                                                                T, risk_free_rate, option['mid_price'],
                                                                 option['option_type'])
-                greeks = self.compute_option_greeks(current_price, option['strike_price'], 
-                                                    T, risk_free_rate, implied_vol, 
+                greeks = self.compute_option_greeks(current_price, option['strike_price'],
+                                                    T, risk_free_rate, implied_vol,
                                                     option['option_type'])
-       
+
                 if greeks:
                     greeks['option_id'] = option['instrument_id']
                     greeks['option_symbol'] = option['option_symbol']
-                    greeks_list.append(greeks)
-                
-                if not greeks_list:
-                    print(f"No valid Greeks calculated for date {date}. Skipping this date.")
-                    continue
-
-                greeks_df = pd.DataFrame(greeks_list).set_index('option_symbol')
-                print(greeks_df)
 
                 # Extract the latest MACD and signal values
                 macd_value = macd.iloc[-1]
                 macd_signal = signal.iloc[-1]
                 print(f"MACD Value: {macd_value}, Signal Value: {macd_signal}")
 
-                # Implement the trading strategies based on the market signal
-                avg_vega = greeks_df['vega'].mean()
-                market_signal = self.detect_market_signal(macd_value, macd_signal, avg_vega, days_to_expiration)
+                market_signal = self.detect_market_signal(macd_value, macd_signal, days_to_expiration)
 
+                timestamp = option['timestamp']
+                option_symbol = option['option_symbol']
+                cur_expire_date = option['expiration_date']
+                delta = greeks['delta']
                 if market_signal == 'bull':
                     # Bull Call Spread (buy call with lower strike, sell call with higher strike)
-                    for option_id, greeks in greeks_df.iterrows():
-                        if greeks['delta'] > 0.3:
-                            # Buy call with lower strike
-                            order_buy = self.create_order(option_id, 'buy', greeks, greeks['strike_price'], 'call')
-                            orders.append(order_buy)
-                            # Sell call with higher strike
-                            higher_strike = self.find_closest_strike(current_price + 2, options_today['strike_price'].unique())  # Arbitrary +2 strike difference
-                            order_sell = self.create_order(option_id, 'sell', greeks, higher_strike, 'call')
+                    
+                    if greeks['delta'] > 0.3:
+                        # Buy call with lower strike
+                        order_buy = self.create_order(timestamp, option_symbol, 'buy', delta)
+                        orders.append(order_buy)
+                        
+                        # Sell call with higher strike
+                        
+                        row = self.find_closest_strike(cur_expire_date, current_price + 2, options_today)  # Arbitrary +2 strike difference
+                        if not row.empty:
+                            delta_hedge = self.calculate_delta(current_price, row['strike_price'],
+                                                                    T, risk_free_rate, row['mid_price'],
+                                                                    row['option_type'])
+                            order_sell = self.create_order(row['timestamp'], row['option_symbol'], 'sell', delta_hedge)
                             orders.append(order_sell)
 
                 elif market_signal == 'bear':
                     # Bear Put Spread (buy put with higher strike, sell put with lower strike)
-                    for option_id, greeks in greeks_df.iterrows():
-                        if greeks['delta'] < -0.3:
-                            # Buy put with higher strike
-                            order_buy = self.create_order(option_id, 'buy', greeks, greeks['strike_price'], 'put')
-                            orders.append(order_buy)
-                            # Sell put with lower strike
-                            lower_strike = self.find_closest_strike(current_price - 2, options_today['strike_price'].unique())  # Arbitrary -2 strike difference
-                            order_sell = self.create_order(option_id, 'sell', greeks, lower_strike, 'put')
+                    if greeks['delta'] < -0.3:
+                        # Buy put with higher strike
+                        order_buy = self.create_order(timestamp, option_symbol, 'buy', delta)
+                        orders.append(order_buy)
+                        
+                        # Sell put with lower strike
+                        row = self.find_closest_strike(cur_expire_date, current_price - 2, options_today)  # Arbitrary -2 strike difference
+                        if not row.empty:
+                            delta_hedge = self.calculate_delta(current_price, row['strike_price'],
+                                                                    T, risk_free_rate, row['mid_price'],
+                                                                    row['option_type'])
+                            order_sell = self.create_order(row['timestamp'], row['option_symbol'], 'sell', delta_hedge)
                             orders.append(order_sell)
 
-                elif market_signal == 'near_expiration':
-                    # Iron Condor (sell OTM call and put, buy deeper OTM call and put)
-                    for option_id, greeks in greeks_df.iterrows():
-                        if greeks['delta'] > 0.3:
-                        # Sell OTM call and buy deeper OTM call
-                            otm_strike = self.find_closest_strike(current_price + 1, options_today['strike_price'].unique())
-                            deeper_otm_strike = self.find_closest_strike(current_price + 2, options_today['strike_price'].unique())
-                            order_sell = self.create_order(option_id, 'sell', greeks, otm_strike, 'call')
-                            orders.append(order_sell)
-                            order_buy = self.create_order(option_id, 'buy', greeks, deeper_otm_strike, 'call')
-                            orders.append(order_buy)
-                        elif greeks['delta'] < -0.3:
-                            # Sell OTM put and buy deeper OTM put
-                            otm_strike = self.find_closest_strike(current_price - 1, options_today['strike_price'].unique())
-                            deeper_otm_strike = self.find_closest_strike(current_price - 2, options_today['strike_price'].unique())
-                            order_sell = self.create_order(option_id, 'sell', greeks, otm_strike, 'put')
-                            orders.append(order_sell)
-                            order_buy = self.create_order(option_id, 'buy', greeks, deeper_otm_strike, 'put')
-                            orders.append(order_buy)
+                # elif market_signal == 'near_expiration':
+                #     # Iron Condor (sell OTM call and put, buy deeper OTM call and put)
+                    
+                #     if greeks['delta'] > 0.3:
+                #     # Sell OTM call and buy deeper OTM call
+
+                #         row = self.find_closest_strike(current_price + 1, options_today)
+                      
+                #         option_symbol = line['option_symbol']
+                #         order_sell = self.create_order(option_symbol, 'sell', greeks, otm_strike, 'call')
+                #         orders.append(order_sell)
+                            
+                #         deeper_otm_strike_lst = self.find_closest_strike(current_price + 2, options_today)
+                #         for line in deeper_otm_strike_lst:
+                #             option_symbol = line['option_symbol']
+                #             order_buy = self.create_order(option_symbol, 'buy', greeks, deeper_otm_strike, 'call')
+                #             orders.append(order_buy)
+                            
+                #     elif greeks['delta'] < -0.3:
+                #         # Sell OTM put and buy deeper OTM put
+                #         otm_strike = self.find_closest_strike(current_price - 1, options_today['strike_price'].unique())
+                #         deeper_otm_strike = self.find_closest_strike(current_price - 2, options_today['strike_price'].unique())
+                #         order_sell = self.create_order(option_symbol, 'sell', greeks, otm_strike, 'put')
+                #         orders.append(order_sell)
+                #         order_buy = self.create_order(option_symbol, 'buy', greeks, deeper_otm_strike, 'put')
+                #         orders.append(order_buy)
 
                 elif market_signal == 'high_volatility':
                     # Straddle (buy both call and put at the same strike price)
-                    for option_id, greeks in greeks_df.iterrows():
-                        # Buy both call and put
-                        if greeks['delta'] > 0.3:
-                            order_call = self.create_order(option_id, 'buy', greeks, greeks['strike_price'], 'call')
-                            orders.append(order_call)
-                        elif greeks['delta'] < -0.3:
-                            order_put = self.create_order(option_id, 'buy', greeks, greeks['strike_price'], 'put')
-                            orders.append(order_put)
+                    # Buy both call and put
+                    if greeks['delta'] > 0.3 or greeks['delta'] < -0.3:
+                        order = self.create_order(timestamp, option_symbol, 'buy', delta)
+                        orders.append(order)
 
         orders_df = pd.DataFrame(orders)
         print("Generated Orders:")
@@ -298,8 +352,9 @@ class Strategy:
             parsed_options = self.parse_data(options)
             parsed_options.to_pickle(parsed_file_path)
             return parsed_options
-
+        
     def parse_data(self, options: pd.DataFrame) -> pd.DataFrame:
+        
         df = options.copy()
 
         df.rename(columns={
@@ -338,7 +393,8 @@ class Strategy:
         df['bid_size'] = df['bid_size'].astype(int)
         df['ask_size'] = df['ask_size'].astype(int)
         df['strike_price'] = df['strike_price'].astype(float)
-    
+        
+        self.add_greeks(df)
         return df[[
             'timestamp',
             'instrument_id',
@@ -352,6 +408,7 @@ class Strategy:
             'ask_size',
             'mid_price',
             'spread'
+            
         ]] 
     # Greek calculation functions
     def calculate_delta(self, S, K, T, r, sigma, option_type):
@@ -387,6 +444,7 @@ class Strategy:
         gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
         return gamma
 
+    # 
     def calculate_vega(self, S, K, T, r, sigma):
         """
         Calculates the Vega of an option.
