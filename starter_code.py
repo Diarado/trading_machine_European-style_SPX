@@ -126,25 +126,42 @@ class Strategy:
         macd = ema_fast - ema_slow
         signal_line = macd.ewm(span=signal, adjust=False).mean()
         return macd, signal_line
-    
-    def create_order(self, timestamp, option_symbol, action, delta):
- 
-        order_size = max(1, int(100 * abs(delta)))  # TODO
-        option_symbol = option_symbol
+    def calculate_order_size(self, option_premium, bid_size, ask_size, action) -> int:
+        # Define risk parameters
+        risk_per_trade_percentage = 0.01  # 1% of capital
+        max_risk_amount = self.capital * risk_per_trade_percentage
+        # Calculate the maximum order size based on risk
+        max_order_size = max_risk_amount / (option_premium * 100 + 0.1 * option_premium * 100)
+
+        # Adjust for available bid/ask sizes
+        if action == 'buy':
+            available_size = ask_size
+        else:
+            available_size = bid_size
+
+        order_size = min(max_order_size, available_size)
+        order_size = int(order_size)
+        order_size = max(order_size, 1)
+        return order_size
+        
+    def create_order(self, timestamp, option_symbol, action, option_premium, bid_size, ask_size):
+        # Calculate order size
+        order_size = self.calculate_order_size(option_premium, bid_size, ask_size, action)
+
         order = {
-        'datetime': timestamp.strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z',
-        'option_symbol': option_symbol,
-        'action': 'B' if action == 'buy' else 'S', 
-        'order_size': order_size
+            'datetime': timestamp.strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z',
+            'option_symbol': option_symbol,
+            'action': 'B' if action == 'buy' else 'S',
+            'order_size': order_size
         }
-    
         return order
+    
     # return a list of parsed options with the closest strike_price
     # example: [  ...strike_price = P...]
     #          [  ..strike_proce = P...] 
 
     def find_closest_strike(self, cur_expire_date, current_price, options_today):
-        available_strikes = options_today[options_today['expiration_date'] == cur_expire_date]
+        available_strikes = options_today[options_today['expiration_date'] == cur_expire_date].copy()  # Create a copy
         if available_strikes.empty:
             return pd.Series()
         else:
@@ -154,8 +171,6 @@ class Strategy:
             
             # Return the row with the minimum strike price difference
             return available_strikes.loc[min_index]
-
-    
     
     def generate_orders(self) -> pd.DataFrame:
         parsed_options = self.load_or_parse_options("data/cleaned_options_data.csv", "data/parsed_options_data.pkl")
@@ -268,12 +283,16 @@ class Strategy:
                 option_symbol = option['option_symbol']
                 cur_expire_date = option['expiration_date']
                 delta = greeks['delta']
+                option_premium = option['mid_price']
+                bid_size = option['bid_size']
+                ask_size = option['ask_size']
                 if market_signal == 'bull':
                     # Bull Call Spread (buy call with lower strike, sell call with higher strike)
                     
                     if greeks['delta'] > 0.3:
                         # Buy call with lower strike
-                        order_buy = self.create_order(timestamp, option_symbol, 'buy', delta)
+                        
+                        order_buy = self.create_order(timestamp, option_symbol, 'buy', option_premium, bid_size, ask_size)
                         orders.append(order_buy)
                         
                         # Sell call with higher strike
@@ -283,14 +302,14 @@ class Strategy:
                             delta_hedge = self.calculate_delta(current_price, row['strike_price'],
                                                                     T, risk_free_rate, row['mid_price'],
                                                                     row['option_type'])
-                            order_sell = self.create_order(row['timestamp'], row['option_symbol'], 'sell', delta_hedge)
+                            order_sell = self.create_order(row['timestamp'], row['option_symbol'], 'sell', option_premium, bid_size, ask_size)
                             orders.append(order_sell)
 
                 elif market_signal == 'bear':
                     # Bear Put Spread (buy put with higher strike, sell put with lower strike)
                     if greeks['delta'] < -0.3:
                         # Buy put with higher strike
-                        order_buy = self.create_order(timestamp, option_symbol, 'buy', delta)
+                        order_buy = self.create_order(timestamp, option_symbol, 'buy', option_premium, bid_size, ask_size)
                         orders.append(order_buy)
                         
                         # Sell put with lower strike
@@ -299,7 +318,7 @@ class Strategy:
                             delta_hedge = self.calculate_delta(current_price, row['strike_price'],
                                                                     T, risk_free_rate, row['mid_price'],
                                                                     row['option_type'])
-                            order_sell = self.create_order(row['timestamp'], row['option_symbol'], 'sell', delta_hedge)
+                            order_sell = self.create_order(row['timestamp'], row['option_symbol'], 'sell', option_premium, bid_size, ask_size)
                             orders.append(order_sell)
 
                 # elif market_signal == 'near_expiration':
@@ -333,12 +352,12 @@ class Strategy:
                     # Straddle (buy both call and put at the same strike price)
                     # Buy both call and put
                     if greeks['delta'] > 0.3 or greeks['delta'] < -0.3:
-                        order = self.create_order(timestamp, option_symbol, 'buy', delta)
+                        order = self.create_order(timestamp, option_symbol, 'buy', option_premium, bid_size, ask_size)
                         orders.append(order)
 
         orders_df = pd.DataFrame(orders)
-        print("Generated Orders:")
-        print(orders_df)
+        # print("Generated Orders:")
+        # print(orders_df)
         return orders_df
    
 
@@ -464,5 +483,5 @@ class Strategy:
         return rho  
    
   
-# st = Strategy()
-# st.generate_orders()
+st = Strategy()
+st.generate_orders()
