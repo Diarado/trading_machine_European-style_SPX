@@ -132,7 +132,7 @@ class Strategy:
         order_size = max(1, int(100 * abs(delta)))  # TODO
         option_symbol = option_symbol
         order = {
-        'datetime': timestamp,
+        'datetime': timestamp.strftime('%Y-%m-%dT%H:%M:%S.%f') + 'Z',
         'option_symbol': option_symbol,
         'action': 'B' if action == 'buy' else 'S', 
         'order_size': order_size
@@ -260,7 +260,7 @@ class Strategy:
                 # Extract the latest MACD and signal values
                 macd_value = macd.iloc[-1]
                 macd_signal = signal.iloc[-1]
-                print(f"MACD Value: {macd_value}, Signal Value: {macd_signal}")
+                # print(f"MACD Value: {macd_value}, Signal Value: {macd_signal}")
 
                 market_signal = self.detect_market_signal(macd_value, macd_signal, days_to_expiration)
 
@@ -464,5 +464,5 @@ class Strategy:
         return rho  
    
   
-st = Strategy()
-st.generate_orders()
+# st = Strategy()
+# st.generate_orders()
