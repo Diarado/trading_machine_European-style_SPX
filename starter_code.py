@@ -394,7 +394,6 @@ class Strategy:
         df['ask_size'] = df['ask_size'].astype(int)
         df['strike_price'] = df['strike_price'].astype(float)
         
-        self.add_greeks(df)
         return df[[
             'timestamp',
             'instrument_id',
