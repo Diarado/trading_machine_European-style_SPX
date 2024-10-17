@@ -123,18 +123,17 @@ class Strategy:
         signal_line = macd.ewm(span=signal, adjust=False).mean()
         return macd, signal_line
     
-    def create_order(self, option_id, action, greeks, strike_price, option):
-        if option == 'call':
-            print('TODO')
-        else:
-            print('TODO')
-        order_size = max(1, int(100 * abs(greeks['delta']))) 
+    def create_order(self, option_id, action, greeks, strike_price, option_symbol):
+ 
+        order_size = max(1, int(100 * abs(greeks['delta'])))  
+
         order = {
-            'datetime': pd.Timestamp.now(), # Todo: need adjusted
-            'option_symbol': option_id,
-            'action': 'B' if action == 'buy' else 'S',
-            'order_size': order_size # Todo: need adjusted
+        'datetime': pd.Timestamp.now().isoformat(),  # Adjust datetime to match the example
+        'option_symbol': option_symbol,
+        'action': 'B' if action == 'buy' else 'S', 
+        'order_size': order_size
         }
+    
         return order
 
     def find_closest_strike(self, current_price, available_strikes):
