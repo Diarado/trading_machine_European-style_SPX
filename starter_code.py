@@ -10,30 +10,18 @@ import matplotlib.pyplot as plt
 import bisect 
 from collections import deque
 from random import randint
+from scipy.stats import percentileofscore
 
 class Strategy:
-  
     def __init__(self, start_date, end_date, options_data, underlying) -> None:
         self.capital : float = 100_000_000
         self.portfolio_value : float = 0
-
         self.start_date : datetime = start_date
         self.end_date : datetime = end_date
-    
-        self.options : pd.DataFrame = pd.read_csv(options_data)
+        self.options : pd.DataFrame = pd.read_csv(options_data).copy()
         self.options["day"] = self.options["ts_recv"].apply(lambda x: x.split("T")[0])
-
-        self.underlying = pd.read_csv(underlying)
-        self.underlying.columns = self.underlying.columns.str.lower()
+        self.spx_minute_data: pd.DataFrame = pd.read_csv(underlying).copy()
         
-        # Parse the 'date' column
-        self.underlying['date'] = pd.to_datetime(self.underlying['date'], format='%Y-%m-%d %H:%M:%S%z', utc=True)
-        self.underlying['date'] = self.underlying['date'].dt.tz_localize(None)
-        
-        columns_to_scale = ['open', 'high', 'low', 'close', 'adj close']
-        self.underlying[columns_to_scale] = self.underlying[columns_to_scale] / 100
-        
-        self.spx_minute_data: pd.DataFrame = pd.read_csv("data/spx_minute_level_data_jan_mar_2024.csv").copy()
         self.spx_minute_data['price'] = self.spx_minute_data['price'] / 100
         # Convert the ms_of_day into a time format (milliseconds to timedelta)
         self.spx_minute_data['ms_of_day'] = pd.to_timedelta(self.spx_minute_data['ms_of_day'], unit='ms')
@@ -50,13 +38,15 @@ class Strategy:
         self.spx_minute_data = self.spx_minute_data.dropna()
         self.spx_minute_data['volatility'] = self.spx_minute_data['volatility']*1000
         self.idx = 0
+        self.volatility_series = self.spx_minute_data['volatility']
     
-    def detect_market_signal(self, macd_value, macd_signal, vol):
+    def detect_market_signal(self, macd_value, macd_signal, vol, volatility_series):
+        vol_percentile = percentileofscore(volatility_series, vol)
         if macd_value > macd_signal:
             return 'bull'
         elif macd_value < macd_signal:
             return 'bear'
-        elif vol >= 2.2:
+        elif vol_percentile >= 96.77:
             return 'high_volatility'
         return 'neutral'
 
@@ -176,14 +166,44 @@ class Strategy:
             
             # Return the row with the minimum strike price difference
             return available_strikes.loc[min_index]
-    
-    def generate_orders(self) -> pd.DataFrame:
-        parsed_options = self.load_or_parse_options("data/cleaned_options_data.csv", "data/parsed_options_data.pkl")
         
+    def parse_symbol(self, symbol: str):
+        pattern = r'(\d{6})([CP])(\d{8})'
+        match = re.search(pattern, symbol)
+        if match:
+            exp, type, strike = match.groups()
+            exp_date = datetime.strptime(exp, '%y%m%d').date()
+            option_type = 'Call' if type == 'C' else 'Put'
+            strike_price = int(strike) / 100000.0
+            return exp_date, option_type, strike_price
+        else:
+            return None, None, None  
+        
+    def parse_symbol_new(self, symbol: str):
+        """
+        EXAMPLE: SPX 20230120P2800000
+        """
+       
+        try:
+            numbers = symbol.split(" ")[1]
+            date = numbers[:8]
+            date_yymmdd = f"{date[0:4]}-{date[4:6]}-{date[6:8]}"
+            action = numbers[8]
+            strike_price = int(numbers[9:]) / 1000
+            expiration_date = datetime.strptime(date_yymmdd, "%Y-%m-%d").date()
+            option_type = 'Call' if action == 'C' else 'Put'
+            return expiration_date, option_type, strike_price
+        except (IndexError, ValueError):
+            return None, None, None
+        
+    def generate_orders(self) -> pd.DataFrame:
+        #parsed_options = self.parse_data(self.options)
+        parsed_options = self.options
         risk_free_rate = 0.03  # predetermined risk-free rate
         max_order_size = 100   # Adjustable maximum order size
         stop_loss_pct = 0.05   # Stop loss percentage
         take_profit_pct = 0.10 # Take profit percentage
+        order_len = 0
         
         orders = []
         portfolio_value = self.capital
@@ -246,6 +266,21 @@ class Strategy:
             # Remove options that are older than the threshold time
             # window_options = window_options[idx:]
             
+            parsed_options.rename(columns={
+                'ts_recv': 'timestamp',
+                'bid_px_00': 'bid_price',
+                'ask_px_00': 'ask_price',
+                'bid_sz_00': 'bid_size',
+                'ask_sz_00': 'ask_size',
+                'symbol': 'option_symbol'
+            }, inplace=True)
+            parsed_options['timestamp'] = pd.to_datetime(parsed_options['timestamp'], format='%Y-%m-%dT%H:%M:%S.%fZ')
+            
+            parsed_columns = parsed_options['option_symbol'].apply(self.parse_symbol).apply(pd.Series)
+
+            # Assign the new columns to the original DataFrame
+            parsed_options[['expiration_date', 'option_type', 'strike_price']] = parsed_columns
+            
             while cur_idx < num_options and parsed_options['timestamp'].iloc[cur_idx] < current_time:
                 cur_idx += 1
                 
@@ -253,11 +288,30 @@ class Strategy:
                 options_today.append(parsed_options.iloc[cur_idx]) 
                 cur_idx += 1
             
-            options_today = pd.DataFrame(options_today)       
-                
+            options_today = pd.DataFrame(options_today)     
+            
+            
             # use model to do determine which option to buy from options_today (tominute)
             for j, option in options_today.iterrows(): 
-                
+                # print(type(option))
+                # Assuming 'option' is a pd.Series
+                expiration_date, option_type, strike_price = self.parse_symbol(option['option_symbol'])
+                # print(expiration_date, option_type, strike_price)
+                option['expiration_date'] = expiration_date
+                option['option_type'] = option_type
+                option['strike_price'] = float(strike_price)
+
+                option['mid_price'] = (float(option['bid_price']) + float(option['ask_price'])) / 2
+                option['bid_price'] = float(option['bid_price'])
+                option['ask_price'] = float(option['ask_price'])
+                option['bid_size'] = int(option['bid_size'])
+                option['ask_size'] = int(option['ask_size'])
+                print('option:')
+                print(option)
+                if order_len >= 1000:
+                    df_orders = pd.DataFrame(orders)
+                    df_orders.to_csv('orders.csv', index=False)
+                    return df_orders
                 expiration_date = pd.to_datetime(option['expiration_date'])
                 timestamp = pd.to_datetime(option['timestamp'])
                 days_to_expiration = (expiration_date - timestamp).days
@@ -283,7 +337,7 @@ class Strategy:
                 macd_signal = signal.iloc[-1]
                 # print(f"MACD Value: {macd_value}, Signal Value: {macd_signal}")
 
-                market_signal = self.detect_market_signal(macd_value, macd_signal, days_to_expiration)
+                market_signal = self.detect_market_signal(macd_value, macd_signal, days_to_expiration, self.volatility_series)
 
                 timestamp = option['timestamp']
                 option_symbol = option['option_symbol']
@@ -297,37 +351,42 @@ class Strategy:
                     
                     if greeks['delta'] > 0.3:
                         # Buy call with lower strike
-                        if randint(1, 10) == 1:
-                            order_buy = self.create_order(timestamp, option_symbol, 'buy', option_premium, bid_size, ask_size)
-                            orders.append(order_buy)
-                            
-                            # Sell call with higher strike
-                            
-                            row = self.find_closest_strike(cur_expire_date, current_price + 2, options_today)  # Arbitrary +2 strike difference
-                            if not row.empty:
-                                # delta_hedge = self.calculate_delta(current_price, row['strike_price'],
-                                #                                         T, risk_free_rate, row['mid_price'],
-                                #                                         row['option_type'])
-                                order_sell = self.create_order(row['timestamp'], row['option_symbol'], 'sell', option_premium, bid_size, ask_size)
-                                orders.append(order_sell)
+   
+                        order_buy = self.create_order(timestamp, option_symbol, 'buy', option_premium, bid_size, ask_size)
+                        orders.append(order_buy)
+                        order_len += 1
+                        
+                        # Sell call with higher strike
+                        
+                        row = self.find_closest_strike(cur_expire_date, current_price + 2, options_today)  # Arbitrary +2 strike difference
+                        if not row.empty:
+                            # delta_hedge = self.calculate_delta(current_price, row['strike_price'],
+                            #                                         T, risk_free_rate, row['mid_price'],
+                            #                                         row['option_type'])
+                            order_sell = self.create_order(row['timestamp'], row['option_symbol'], 'sell', option_premium, bid_size, ask_size)
+                            orders.append(order_sell)
+                            order_len += 1
 
                 elif market_signal == 'bear':
                     # Bear Put Spread (buy put with higher strike, sell put with lower strike)
                     if greeks['delta'] < -0.3:
                         # Buy put with higher strike
-                        if randint(1, 10) == 1:
-                            order_buy = self.create_order(timestamp, option_symbol, 'buy', option_premium, bid_size, ask_size)
+                    
+                        order_buy = self.create_order(timestamp, option_symbol, 'buy', option_premium, bid_size, ask_size)
+                        orders.append(order_buy)
+                        order_len += 1
                         
-                            orders.append(order_buy)
-                            
-                            # Sell put with lower strike
-                            row = self.find_closest_strike(cur_expire_date, current_price - 2, options_today)  # Arbitrary -2 strike difference
-                            if not row.empty:
-                                # delta_hedge = self.calculate_delta(current_price, row['strike_price'],
-                                #                                         T, risk_free_rate, row['mid_price'],
-                                #                                         row['option_type'])
-                                order_sell = self.create_order(row['timestamp'], row['option_symbol'], 'sell', option_premium, bid_size, ask_size)
-                                orders.append(order_sell)
+                        # Sell put with lower strike
+                        print('options_today')
+                        print(options_today)
+                        row = self.find_closest_strike(cur_expire_date, current_price - 2, options_today)  # Arbitrary -2 strike difference
+                        if not row.empty:
+                            # delta_hedge = self.calculate_delta(current_price, row['strike_price'],
+                            #                                         T, risk_free_rate, row['mid_price'],
+                            #                                         row['option_type'])
+                            order_sell = self.create_order(row['timestamp'], row['option_symbol'], 'sell', option_premium, bid_size, ask_size)
+                            orders.append(order_sell)
+                            order_len += 1
 
                 # elif market_signal == 'near_expiration':
                 #     # Iron Condor (sell OTM call and put, buy deeper OTM call and put)
@@ -361,92 +420,78 @@ class Strategy:
                     # Buy both call and put
                     
                     if greeks['delta'] > 0.3 or greeks['delta'] < -0.3:
-                        if randint(1, 10) == 1:
-                            order = self.create_order(timestamp, option_symbol, 'buy', option_premium, bid_size, ask_size)
-                            orders.append(order)
+                      
+                        order = self.create_order(timestamp, option_symbol, 'buy', option_premium, bid_size, ask_size)
+                        orders.append(order)
+                        order_len += 1
 
         orders_df = pd.DataFrame(orders)
+        df_orders.to_csv('orders.csv', index=False)
         # print("Generated Orders:")
         # print(orders_df)
         return orders_df
    
 
-    def load_or_parse_options(self, raw_file_path: str, parsed_file_path: str) -> pd.DataFrame:
-        print(f"Parsing raw options data from {raw_file_path}")
-        options = pd.read_csv(raw_file_path)
-        parsed_options = self.parse_data(options)
-        parsed_options.to_pickle(parsed_file_path)
-        return parsed_options
-        # if os.path.exists(parsed_file_path):
-        #     print(f"Loading parsed options data from {parsed_file_path}")
-        #     return pd.read_pickle(parsed_file_path)
-        # else:
-        #     print(f"Parsing raw options data from {raw_file_path}")
-        #     options = pd.read_csv(raw_file_path)
-        #     parsed_options = self.parse_data(options)
-        #     parsed_options.to_pickle(parsed_file_path)
-        #     return parsed_options
-    
-    def parse_data(self, options: pd.DataFrame) -> pd.DataFrame:
+    # def parse_data(self, options: pd.DataFrame) -> pd.DataFrame:
         
-        df = options.copy()
+    #     df = options.copy()
 
-        df.rename(columns={
-            'ts_recv': 'timestamp',
-            'bid_px_00': 'bid_price',
-            'ask_px_00': 'ask_price',
-            'bid_sz_00': 'bid_size',
-            'ask_sz_00': 'ask_size',
-            'symbol': 'option_symbol'
-        }, inplace=True)
+    #     df.rename(columns={
+    #         'ts_recv': 'timestamp',
+    #         'bid_px_00': 'bid_price',
+    #         'ask_px_00': 'ask_price',
+    #         'bid_sz_00': 'bid_size',
+    #         'ask_sz_00': 'ask_size',
+    #         'symbol': 'option_symbol'
+    #     }, inplace=True)
 
-        df['timestamp'] = pd.to_datetime(df['timestamp'], format='%Y-%m-%dT%H:%M:%S.%fZ')
+    #     df['timestamp'] = pd.to_datetime(df['timestamp'], format='%Y-%m-%dT%H:%M:%S.%fZ')
 
-        def parse_symbol(symbol: str):
-            """
-            EXAMPLE: SPX 20230120P2800000
-            """
-            try:
-                numbers = symbol.split(" ")[1]
-                date = numbers[:8]
-                date_yymmdd = f"{date[0:4]}-{date[4:6]}-{date[6:8]}"
-                action = numbers[8]
-                strike_price = int(numbers[9:]) / 1000
-                expiration_date = datetime.strptime(date_yymmdd, "%Y-%m-%d").date()
-                option_type = 'Call' if action == 'C' else 'Put'
-                return expiration_date, option_type, strike_price
-            except (IndexError, ValueError):
-                return None, None, None
+    #     def parse_symbol(symbol: str):
+    #         """
+    #         EXAMPLE: SPX 20230120P2800000
+    #         """
+    #         try:
+    #             numbers = symbol.split(" ")[1]
+    #             date = numbers[:8]
+    #             date_yymmdd = f"{date[0:4]}-{date[4:6]}-{date[6:8]}"
+    #             action = numbers[8]
+    #             strike_price = int(numbers[9:]) / 1000
+    #             expiration_date = datetime.strptime(date_yymmdd, "%Y-%m-%d").date()
+    #             option_type = 'Call' if action == 'C' else 'Put'
+    #             return expiration_date, option_type, strike_price
+    #         except (IndexError, ValueError):
+    #             return None, None, None
 
-        df[['expiration_date', 'option_type', 'strike_price']] = df['option_symbol'].apply(
-            lambda x: pd.Series(parse_symbol(x))
-        )
-        df.dropna(subset=['expiration_date', 'option_type', 'strike_price'], inplace=True)
+    #     df[['expiration_date', 'option_type', 'strike_price']] = df['option_symbol'].apply(
+    #         lambda x: pd.Series(parse_symbol(x))
+    #     )
+    #     df.dropna(subset=['expiration_date', 'option_type', 'strike_price'], inplace=True)
 
-        df['mid_price'] = (df['bid_price'] + df['ask_price']) / 2
-        df['spread'] = df['ask_price'] - df['bid_price']
+    #     df['mid_price'] = (df['bid_price'] + df['ask_price']) / 2
+    #     df['spread'] = df['ask_price'] - df['bid_price']
 
-        df['bid_price'] = df['bid_price'].astype(float)
-        df['ask_price'] = df['ask_price'].astype(float)
-        df['bid_size'] = df['bid_size'].astype(int)
-        df['ask_size'] = df['ask_size'].astype(int)
-        df['strike_price'] = df['strike_price'].astype(float)
+    #     df['bid_price'] = df['bid_price'].astype(float)
+    #     df['ask_price'] = df['ask_price'].astype(float)
+    #     df['bid_size'] = df['bid_size'].astype(int)
+    #     df['ask_size'] = df['ask_size'].astype(int)
+    #     df['strike_price'] = df['strike_price'].astype(float)
         
-        return df[[
-            'timestamp',
-            'instrument_id',
-            'option_symbol',
-            'expiration_date',
-            'option_type',
-            'strike_price',
-            'bid_price',
-            'ask_price',
-            'bid_size',
-            'ask_size',
-            'mid_price',
-            'spread'
+    #     return df[[
+    #         'timestamp',
+    #         'instrument_id',
+    #         'option_symbol',
+    #         'expiration_date',
+    #         'option_type',
+    #         'strike_price',
+    #         'bid_price',
+    #         'ask_price',
+    #         'bid_size',
+    #         'ask_size',
+    #         'mid_price',
+    #         'spread'
             
-        ]] 
+    #     ]] 
     # Greek calculation functions
     def calculate_delta(self, S, K, T, r, sigma, option_type):
         """
