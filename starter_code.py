@@ -366,16 +366,21 @@ class Strategy:
    
 
     def load_or_parse_options(self, raw_file_path: str, parsed_file_path: str) -> pd.DataFrame:
-        if os.path.exists(parsed_file_path):
-            print(f"Loading parsed options data from {parsed_file_path}")
-            return pd.read_pickle(parsed_file_path)
-        else:
-            print(f"Parsing raw options data from {raw_file_path}")
-            options = pd.read_csv(raw_file_path)
-            parsed_options = self.parse_data(options)
-            parsed_options.to_pickle(parsed_file_path)
-            return parsed_options
-        
+        print(f"Parsing raw options data from {raw_file_path}")
+        options = pd.read_csv(raw_file_path)
+        parsed_options = self.parse_data(options)
+        parsed_options.to_pickle(parsed_file_path)
+        return parsed_options
+        # if os.path.exists(parsed_file_path):
+        #     print(f"Loading parsed options data from {parsed_file_path}")
+        #     return pd.read_pickle(parsed_file_path)
+        # else:
+        #     print(f"Parsing raw options data from {raw_file_path}")
+        #     options = pd.read_csv(raw_file_path)
+        #     parsed_options = self.parse_data(options)
+        #     parsed_options.to_pickle(parsed_file_path)
+        #     return parsed_options
+    
     def parse_data(self, options: pd.DataFrame) -> pd.DataFrame:
         
         df = options.copy()
@@ -392,15 +397,19 @@ class Strategy:
         df['timestamp'] = pd.to_datetime(df['timestamp'], format='%Y-%m-%dT%H:%M:%S.%fZ')
 
         def parse_symbol(symbol: str):
-            pattern = r'(\d{6})([CP])(\d{8})'
-            match = re.search(pattern, symbol)
-            if match:
-                exp, type, strike = match.groups()
-                exp_date = datetime.strptime(exp, '%y%m%d').date()
-                option_type = 'Call' if type == 'C' else 'Put'
-                strike_price = int(strike) / 100000
-                return exp_date, option_type, strike_price
-            else:
+            """
+            EXAMPLE: SPX 20230120P2800000
+            """
+            try:
+                numbers = symbol.split(" ")[1]
+                date = numbers[:8]
+                date_yymmdd = f"{date[0:4]}-{date[4:6]}-{date[6:8]}"
+                action = numbers[8]
+                strike_price = int(numbers[9:]) / 1000
+                expiration_date = datetime.strptime(date_yymmdd, "%Y-%m-%d").date()
+                option_type = 'Call' if action == 'C' else 'Put'
+                return expiration_date, option_type, strike_price
+            except (IndexError, ValueError):
                 return None, None, None
 
         df[['expiration_date', 'option_type', 'strike_price']] = df['option_symbol'].apply(
