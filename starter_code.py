@@ -147,13 +147,17 @@ class Strategy:
     def create_order(self, timestamp, option_symbol, action, option_premium, bid_size, ask_size):
         # Calculate order size
         order_size = self.calculate_order_size(option_premium, bid_size, ask_size, action)
-
+        # print('!!!')
+        # print(type(timestamp))
+        # print(timestamp)
+        
         order = {
-            'datetime': timestamp.strftime('%Y-%m-%dT%H:%M:%S') + f'.{timestamp.nanosecond:09d}' + 'Z',
+            'datetime': timestamp.strftime('%Y-%m-%dT%H:%M:%S.%f')+ f'{timestamp.nanosecond:03d}' + 'Z',
             'option_symbol': option_symbol,
             'action': 'B' if action == 'buy' else 'S',
             'order_size': order_size
         }
+        # print(order)
         return order
     
     # return a list of parsed options with the closest strike_price
@@ -483,5 +487,5 @@ class Strategy:
         return rho  
    
   
-# st = Strategy()
-# st.generate_orders()
+st = Strategy()
+st.generate_orders()
