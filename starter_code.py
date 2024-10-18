@@ -9,20 +9,21 @@ from scipy.stats import norm
 import matplotlib.pyplot as plt
 import bisect 
 from collections import deque
+from random import randint
 
 class Strategy:
   
-    def __init__(self) -> None:
+    def __init__(self, start_date, end_date, options_data, underlying) -> None:
         self.capital : float = 100_000_000
         self.portfolio_value : float = 0
 
-        self.start_date : datetime = datetime(2024, 1, 1)
-        self.end_date : datetime = datetime(2024, 3, 30)
+        self.start_date : datetime = start_date
+        self.end_date : datetime = end_date
     
-        self.options : pd.DataFrame = pd.read_csv("data/cleaned_options_data.csv").copy()
+        self.options : pd.DataFrame = pd.read_csv(options_data)
         self.options["day"] = self.options["ts_recv"].apply(lambda x: x.split("T")[0])
 
-        self.underlying = pd.read_csv("data/underlying_data_hour.csv").copy()
+        self.underlying = pd.read_csv(underlying)
         self.underlying.columns = self.underlying.columns.str.lower()
         
         # Parse the 'date' column
@@ -256,6 +257,7 @@ class Strategy:
                 
             # use model to do determine which option to buy from options_today (tominute)
             for j, option in options_today.iterrows(): 
+                
                 expiration_date = pd.to_datetime(option['expiration_date'])
                 timestamp = pd.to_datetime(option['timestamp'])
                 days_to_expiration = (expiration_date - timestamp).days
@@ -295,35 +297,37 @@ class Strategy:
                     
                     if greeks['delta'] > 0.3:
                         # Buy call with lower strike
-                        
-                        order_buy = self.create_order(timestamp, option_symbol, 'buy', option_premium, bid_size, ask_size)
-                        orders.append(order_buy)
-                        
-                        # Sell call with higher strike
-                        
-                        row = self.find_closest_strike(cur_expire_date, current_price + 2, options_today)  # Arbitrary +2 strike difference
-                        if not row.empty:
-                            delta_hedge = self.calculate_delta(current_price, row['strike_price'],
-                                                                    T, risk_free_rate, row['mid_price'],
-                                                                    row['option_type'])
-                            order_sell = self.create_order(row['timestamp'], row['option_symbol'], 'sell', option_premium, bid_size, ask_size)
-                            orders.append(order_sell)
+                        if randint(1, 10) == 1:
+                            order_buy = self.create_order(timestamp, option_symbol, 'buy', option_premium, bid_size, ask_size)
+                            orders.append(order_buy)
+                            
+                            # Sell call with higher strike
+                            
+                            row = self.find_closest_strike(cur_expire_date, current_price + 2, options_today)  # Arbitrary +2 strike difference
+                            if not row.empty:
+                                # delta_hedge = self.calculate_delta(current_price, row['strike_price'],
+                                #                                         T, risk_free_rate, row['mid_price'],
+                                #                                         row['option_type'])
+                                order_sell = self.create_order(row['timestamp'], row['option_symbol'], 'sell', option_premium, bid_size, ask_size)
+                                orders.append(order_sell)
 
                 elif market_signal == 'bear':
                     # Bear Put Spread (buy put with higher strike, sell put with lower strike)
                     if greeks['delta'] < -0.3:
                         # Buy put with higher strike
-                        order_buy = self.create_order(timestamp, option_symbol, 'buy', option_premium, bid_size, ask_size)
-                        orders.append(order_buy)
+                        if randint(1, 10) == 1:
+                            order_buy = self.create_order(timestamp, option_symbol, 'buy', option_premium, bid_size, ask_size)
                         
-                        # Sell put with lower strike
-                        row = self.find_closest_strike(cur_expire_date, current_price - 2, options_today)  # Arbitrary -2 strike difference
-                        if not row.empty:
-                            delta_hedge = self.calculate_delta(current_price, row['strike_price'],
-                                                                    T, risk_free_rate, row['mid_price'],
-                                                                    row['option_type'])
-                            order_sell = self.create_order(row['timestamp'], row['option_symbol'], 'sell', option_premium, bid_size, ask_size)
-                            orders.append(order_sell)
+                            orders.append(order_buy)
+                            
+                            # Sell put with lower strike
+                            row = self.find_closest_strike(cur_expire_date, current_price - 2, options_today)  # Arbitrary -2 strike difference
+                            if not row.empty:
+                                # delta_hedge = self.calculate_delta(current_price, row['strike_price'],
+                                #                                         T, risk_free_rate, row['mid_price'],
+                                #                                         row['option_type'])
+                                order_sell = self.create_order(row['timestamp'], row['option_symbol'], 'sell', option_premium, bid_size, ask_size)
+                                orders.append(order_sell)
 
                 # elif market_signal == 'near_expiration':
                 #     # Iron Condor (sell OTM call and put, buy deeper OTM call and put)
@@ -355,9 +359,11 @@ class Strategy:
                 elif market_signal == 'high_volatility':
                     # Straddle (buy both call and put at the same strike price)
                     # Buy both call and put
+                    
                     if greeks['delta'] > 0.3 or greeks['delta'] < -0.3:
-                        order = self.create_order(timestamp, option_symbol, 'buy', option_premium, bid_size, ask_size)
-                        orders.append(order)
+                        if randint(1, 10) == 1:
+                            order = self.create_order(timestamp, option_symbol, 'buy', option_premium, bid_size, ask_size)
+                            orders.append(order)
 
         orders_df = pd.DataFrame(orders)
         # print("Generated Orders:")
@@ -496,5 +502,5 @@ class Strategy:
         return rho  
    
   
-st = Strategy()
-st.generate_orders()
+# st = Strategy()
+# st.generate_orders()
